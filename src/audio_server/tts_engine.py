@@ -3,7 +3,9 @@
 import io
 import logging
 import os
+import subprocess
 import tarfile
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -153,6 +155,56 @@ class _SherpaOnnxTtsBackend:
         buf.seek(0)
         return buf.read()
 
+    def synthesize_to_pcm_bytes(
+        self,
+        text: str,
+        sid: Optional[int] = None,
+        speed: Optional[float] = None,
+    ) -> tuple[bytes, int]:
+        """Synthesize text and return raw Int16 PCM bytes + sample rate.
+
+        Returns:
+            Tuple of (raw_pcm_bytes, sample_rate).
+        """
+        samples, sample_rate = self.synthesize(text, sid=sid, speed=speed)
+        int16_data = (samples * 32767).clip(-32768, 32767).astype(np.int16)
+        return int16_data.tobytes(), sample_rate
+
+    def synthesize_to_mp3_bytes(
+        self,
+        text: str,
+        sid: Optional[int] = None,
+        speed: Optional[float] = None,
+    ) -> bytes:
+        """Synthesize text and return MP3 bytes via ffmpeg."""
+        samples, sample_rate = self.synthesize(text, sid=sid, speed=speed)
+        # Write WAV to temp buffer
+        wav_buf = io.BytesIO()
+        sf.write(wav_buf, samples, samplerate=sample_rate, format="WAV")
+        wav_buf.seek(0)
+
+        # Pipe through ffmpeg to encode MP3
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f", "wav",
+                "-i", "pipe:0",
+                "-f", "mp3",
+                "-b:a", "128k",
+                "-bitexact",
+                "pipe:1",
+            ],
+            input=wav_buf.read(),
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg MP3 encoding failed: {proc.stderr.decode(errors='replace')}"
+            )
+        return proc.stdout
+
     @property
     def sample_rate(self) -> int:
         return self._sample_rate
@@ -282,6 +334,28 @@ class TTSEngine:
         if self._backend is None:
             raise RuntimeError("TTS engine not loaded. Call load() first.")
         return self._backend.synthesize_to_wav_bytes(text, sid=sid, speed=speed)
+
+    def synthesize_to_pcm_bytes(
+        self,
+        text: str,
+        sid: Optional[int] = None,
+        speed: Optional[float] = None,
+    ) -> tuple[bytes, int]:
+        """Synthesize text and return raw Int16 PCM bytes + sample rate."""
+        if self._backend is None:
+            raise RuntimeError("TTS engine not loaded. Call load() first.")
+        return self._backend.synthesize_to_pcm_bytes(text, sid=sid, speed=speed)
+
+    def synthesize_to_mp3_bytes(
+        self,
+        text: str,
+        sid: Optional[int] = None,
+        speed: Optional[float] = None,
+    ) -> bytes:
+        """Synthesize text and return MP3 bytes."""
+        if self._backend is None:
+            raise RuntimeError("TTS engine not loaded. Call load() first.")
+        return self._backend.synthesize_to_mp3_bytes(text, sid=sid, speed=speed)
 
     @property
     def is_loaded(self) -> bool:

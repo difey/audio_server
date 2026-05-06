@@ -100,8 +100,8 @@ class TTSRequest(BaseModel):
     )
     response_format: str = Field(
         default="wav",
-        description="Audio format (only 'wav' supported)",
-        pattern=r"^wav$",
+        description="Audio format: wav, pcm (raw Int16), or mp3",
+        pattern=r"^(wav|pcm|mp3)$",
     )
     speed: float = Field(
         default=1.0,
@@ -118,6 +118,11 @@ class TTSRequest(BaseModel):
 async def text_to_speech(req: TTSRequest):
     """Synthesize text to speech (OpenAI-compatible endpoint).
 
+    Supported response formats:
+    - `wav` — WAV file (audio/wav)
+    - `pcm` — raw Int16 PCM (audio/L16)
+    - `mp3` — MP3 via ffmpeg (audio/mpeg)
+
     Request:
         ```json
         {
@@ -130,7 +135,7 @@ async def text_to_speech(req: TTSRequest):
         ```
 
     Returns:
-        WAV audio bytes with Content-Type: audio/wav.
+        Audio bytes (WAV / PCM / MP3) with the appropriate Content-Type.
     """
     if not _tts_engine.is_loaded:
         return Response(
@@ -142,16 +147,41 @@ async def text_to_speech(req: TTSRequest):
     sid = int(req.voice) if req.voice is not None else None
 
     try:
-        wav_bytes = _tts_engine.synthesize_to_wav_bytes(
-            text=req.input,
-            sid=sid,
-            speed=req.speed,
-        )
+        fmt = req.response_format
+
+        if fmt == "wav":
+            audio_bytes = _tts_engine.synthesize_to_wav_bytes(
+                text=req.input, sid=sid, speed=req.speed,
+            )
+            media_type = "audio/wav"
+            filename = "speech.wav"
+
+        elif fmt == "pcm":
+            audio_bytes, sample_rate = _tts_engine.synthesize_to_pcm_bytes(
+                text=req.input, sid=sid, speed=req.speed,
+            )
+            media_type = f"audio/L16; rate={sample_rate}; channels=1"
+            filename = "speech.pcm"
+
+        elif fmt == "mp3":
+            audio_bytes = _tts_engine.synthesize_to_mp3_bytes(
+                text=req.input, sid=sid, speed=req.speed,
+            )
+            media_type = "audio/mpeg"
+            filename = "speech.mp3"
+
+        else:
+            return Response(
+                content=f'{{"error": "Unsupported response_format: {fmt}"}}',
+                status_code=400,
+                media_type="application/json",
+            )
+
         return Response(
-            content=wav_bytes,
-            media_type="audio/wav",
+            content=audio_bytes,
+            media_type=media_type,
             headers={
-                "Content-Disposition": 'inline; filename="speech.wav"',
+                "Content-Disposition": f'inline; filename="{filename}"',
             },
         )
     except Exception as e:
