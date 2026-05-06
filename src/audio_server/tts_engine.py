@@ -133,14 +133,17 @@ class _SherpaOnnxTtsBackend:
         if len(audio.samples) == 0:
             raise RuntimeError("TTS generated empty audio")
 
-        audio_duration = len(audio.samples) / audio.sample_rate
+        # Convert to float32 numpy array (sherpa-onnx may return a list)
+        samples = np.array(audio.samples, dtype=np.float32)
+
+        audio_duration = len(samples) / audio.sample_rate
         rtf = elapsed / audio_duration if audio_duration > 0 else 0
         logger.info(
             "TTS: %.1fs audio generated in %.2fs (RTF=%.2f, text='%s')",
             audio_duration, elapsed, rtf, text[:50],
         )
 
-        return audio.samples, audio.sample_rate
+        return samples, audio.sample_rate
 
     def synthesize_to_wav_bytes(
         self,
