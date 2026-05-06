@@ -1,0 +1,253 @@
+"""ASR server FastAPI application entry point."""
+
+import logging
+import sys
+from pathlib import Path
+
+import uvicorn
+from contextlib import asynccontextmanager
+from pydantic import BaseModel, Field
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, Response
+
+from .asr_engine import ASREngine
+from .config import settings
+from .session import Session, session_manager
+from .tts_engine import TTSEngine
+
+# ── Logging ──────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("asr_server")
+
+# ── ASR Engine (global singleton) ────────────────────────────────────
+_asr_engine = ASREngine()
+
+# ── TTS Engine (global singleton, optional) ──────────────────────────
+_tts_engine = TTSEngine()
+
+
+def _patch_webrtcvad():
+    """Patch webrtcvad to use importlib.metadata instead of pkg_resources."""
+    import importlib.metadata
+    try:
+        import webrtcvad as _mod
+        src = _mod.__file__
+        if src and src.endswith(".py"):
+            content = Path(src).read_text()
+            if "pkg_resources" in content:
+                new_content = content.replace(
+                    "import pkg_resources",
+                    "from importlib.metadata import version as _ver",
+                ).replace(
+                    "pkg_resources.get_distribution('webrtcvad').version",
+                    "_ver('webrtcvad')",
+                )
+                Path(src).write_text(new_content)
+                logger.info("Patched webrtcvad %s", src)
+    except Exception as e:
+        logger.warning("Failed to patch webrtcvad: %s", e)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle."""
+    logger.info("Starting ASR server...")
+
+    if settings.asr_enabled:
+        _patch_webrtcvad()
+        _asr_engine.load()
+    else:
+        logger.info("ASR is disabled (set ASR_ENABLED=true to enable)")
+
+    if settings.tts_enabled:
+        logger.info("TTS is enabled, loading TTS engine...")
+        _tts_engine.load()
+    else:
+        logger.info("TTS is disabled (set TTS_ENABLED=true to enable)")
+
+    logger.info("Ready. Listening on %s:%d", settings.host, settings.port)
+    yield
+    logger.info("Shutting down.")
+
+
+# ── App ──────────────────────────────────────────────────────────────
+app = FastAPI(title="ASR Server", version="0.1.0", lifespan=lifespan)
+
+# ── TTS request model ────────────────────────────────────────────────
+
+
+class TTSRequest(BaseModel):
+    """Request body for POST /v1/audio/speech."""
+
+    model: str = Field(
+        default=settings.tts_model,
+        description="TTS model name",
+    )
+    input: str = Field(
+        ...,
+        description="Text to synthesize",
+        min_length=1,
+        max_length=2000,
+    )
+    voice: str | None = Field(
+        default=None,
+        description="Speaker ID (e.g. '0', '1')",
+    )
+    response_format: str = Field(
+        default="wav",
+        description="Audio format (only 'wav' supported)",
+        pattern=r"^wav$",
+    )
+    speed: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=2.0,
+        description="Speed factor (0.5-2.0)",
+    )
+
+
+# ── TTS endpoint ─────────────────────────────────────────────────────
+
+
+@app.post("/v1/audio/speech")
+async def text_to_speech(req: TTSRequest):
+    """Synthesize text to speech (OpenAI-compatible endpoint).
+
+    Request:
+        ```json
+        {
+          "model": "matcha-icefall-zh-en",
+          "input": "你好，世界！",
+          "voice": "0",
+          "response_format": "wav",
+          "speed": 1.0
+        }
+        ```
+
+    Returns:
+        WAV audio bytes with Content-Type: audio/wav.
+    """
+    if not _tts_engine.is_loaded:
+        return Response(
+            content='{"error": "TTS engine not loaded. Enable TTS_ENABLED=true"}',
+            status_code=503,
+            media_type="application/json",
+        )
+
+    sid = int(req.voice) if req.voice is not None else None
+
+    try:
+        wav_bytes = _tts_engine.synthesize_to_wav_bytes(
+            text=req.input,
+            sid=sid,
+            speed=req.speed,
+        )
+        return Response(
+            content=wav_bytes,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": 'inline; filename="speech.wav"',
+            },
+        )
+    except Exception as e:
+        logger.error("TTS synthesis error: %s", e, exc_info=True)
+        return Response(
+            content=f'{{"error": "TTS synthesis failed: {e}"}}',
+            status_code=500,
+            media_type="application/json",
+        )
+
+
+# ── Static files (Vue SPA) ───────────────────────────────────────────
+STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR_EXISTS = STATIC_DIR.is_dir()
+
+
+@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
+async def serve_frontend(full_path: str = ""):
+    """Serve the Vue SPA or static assets.
+
+    This catch-all route only handles HTTP GET/HEAD, not WebSocket.
+    WebSocket upgrade requests at /ws/transcribe are handled by
+    the dedicated route before reaching here.
+    """
+    # Skip for WebSocket paths (shouldn't reach here, but just in case)
+    if full_path.startswith("ws/"):
+        return HTMLResponse(status_code=404)
+
+    if not STATIC_DIR_EXISTS:
+        return {
+            "service": "ASR Server",
+            "model": settings.sherpa_onnx_model,
+            "status": "running",
+            "ws_endpoint": "/ws/transcribe",
+        }
+
+    # Serve specific file if it exists
+    if full_path:
+        file_path = STATIC_DIR / full_path
+        if file_path.is_file():
+            return FileResponse(str(file_path))
+
+    # SPA fallback: always serve index.html
+    index_content = (STATIC_DIR / "index.html").read_bytes()
+    return Response(content=index_content, media_type="text/html")
+
+
+# ── WebSocket ────────────────────────────────────────────────────────
+@app.websocket("/ws/transcribe")
+async def websocket_endpoint(ws: WebSocket):
+    if not _asr_engine.is_loaded:
+        await ws.accept()
+        await ws.send_json({
+            "type": "error",
+            "message": "ASR is disabled (set ASR_ENABLED=true to enable)",
+        })
+        await ws.close(code=1011, reason="ASR disabled")
+        return
+
+    await ws.accept()
+    session = await session_manager.create_session(ws)
+    if session is None:
+        return  # rejected — already closed by create_session
+
+    logger.info(
+        "Client connected (%d active)",
+        session_manager.active_count,
+    )
+
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            await session.handle_audio(data)
+    except WebSocketDisconnect:
+        logger.info("Client disconnected")
+    except Exception as e:
+        logger.error("WebSocket error: %s", e)
+    finally:
+        await session_manager.remove_session(ws)
+        logger.info(
+            "Session cleaned up (%d active)",
+            session_manager.active_count,
+        )
+
+
+# ── Entry point ──────────────────────────────────────────────────────
+def main():
+    uvicorn.run(
+        "asr_server.main:app",
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+        ws_max_size=1024 * 1024,  # 1MB max WS message
+    )
+
+
+if __name__ == "__main__":
+    main()

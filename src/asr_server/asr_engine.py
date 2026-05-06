@@ -1,0 +1,376 @@
+"""ASR engine — sherpa-onnx backend for ONNX-based ASR models."""
+
+import logging
+import os
+import time
+import tarfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import requests
+
+from .config import settings
+
+logger = logging.getLogger(__name__)
+
+_SHERTA_MODEL_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models"
+)
+
+
+# ── sherpa-onnx backend ────────────────────────────────────────────
+
+class _SherpaOnnxBackend:
+    """Wrapper around sherpa-onnx (SenseVoice / FunASR Nano / Qwen3-ASR / Whisper / Moonshine V2).
+
+    Auto-downloads the model from GitHub releases on first load.
+    Model type is auto-detected from model name, or override via
+    SHERPA_ONNX_MODEL_TYPE env var.
+
+    SenseVoice:
+        sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09
+        → model.int8.onnx, tokens.txt
+
+    FunASR Nano:
+        sherpa-onnx-funasr-nano-int8-2025-12-30
+        → encoder_adaptor.int8.onnx, llm_int8/llm.int8.onnx,
+          embedding.int8.onnx, Qwen3-0.6B/ (tokenizer dir)
+
+    Qwen3-ASR:
+        sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
+        → conv_frontend.onnx, encoder.int8.onnx, decoder.int8.onnx,
+          tokenizer/ (tokenizer dir)
+
+    Whisper:
+        sherpa-onnx-whisper-{size}
+        → {size}-encoder.int8.onnx, {size}-decoder.int8.onnx, {size}-tokens.txt
+
+    Moonshine V2:
+        sherpa-onnx-moonshine-base-{lang}-quantized-2026-02-27
+        → encoder_model.ort, decoder_model_merged.ort, tokens.txt
+    """
+
+    _SENSE_VOICE = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2025-09-09"
+    _FUNASR_NANO = "sherpa-onnx-funasr-nano-int8-2025-12-30"
+    _QWEN3_ASR = "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
+    _MOONSHINE_V2_ZH = "sherpa-onnx-moonshine-base-zh-quantized-2026-02-27"
+    _MOONSHINE_V2_EN = "sherpa-onnx-moonshine-base-en-quantized-2026-02-27"
+    _MOONSHINE_V2_ES = "sherpa-onnx-moonshine-base-es-quantized-2026-02-27"
+
+    # funasr_mlt_nano shares same file structure as funasr_nano
+    _MODEL_NAMES = {
+        "sense_voice": _SENSE_VOICE,
+        "funasr_nano": _FUNASR_NANO,
+        "funasr_mlt_nano": _FUNASR_NANO,  # same structure, different weights
+        "qwen3_asr": _QWEN3_ASR,
+        "moonshine_v2": _MOONSHINE_V2_ZH,
+    }
+
+    # Known moonshine v2 variants for auto-detection
+    _MOONSHINE_V2_MODELS = {
+        _MOONSHINE_V2_ZH,
+        _MOONSHINE_V2_EN,
+        _MOONSHINE_V2_ES,
+    }
+
+    def __init__(self):
+        import sherpa_onnx
+
+        self._model_type = self._detect_model_type()
+        model_dir = self._ensure_model()
+
+        lang = settings.sherpa_onnx_language or ""
+        t0 = time.time()
+
+        if self._model_type in ("funasr_nano", "funasr_mlt_nano"):
+            self._init_funasr_nano(sherpa_onnx, model_dir, lang)
+        elif self._model_type == "qwen3_asr":
+            self._init_qwen3_asr(sherpa_onnx, model_dir)
+        elif self._model_type == "whisper":
+            self._init_whisper(sherpa_onnx, model_dir)
+        elif self._model_type == "moonshine_v2":
+            self._init_moonshine_v2(sherpa_onnx, model_dir)
+        else:
+            self._init_sense_voice(sherpa_onnx, model_dir, lang)
+
+        logger.info("Model loaded in %.2fs", time.time() - t0)
+
+    # ── Init helpers ────────────────────────────────────────────────
+
+    def _init_sense_voice(self, sherpa_onnx, model_dir: Path, lang: str) -> None:
+        logger.info(
+            "Loading sherpa-onnx SenseVoice (threads=%d, language=%s)...",
+            settings.sherpa_onnx_num_threads,
+            lang or "auto",
+        )
+        self._recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+            model=str(model_dir / "model.int8.onnx"),
+            tokens=str(model_dir / "tokens.txt"),
+            num_threads=settings.sherpa_onnx_num_threads,
+            language=lang,
+            use_itn=True,
+            debug=False,
+        )
+
+    def _init_funasr_nano(self, sherpa_onnx, model_dir: Path, lang: str) -> None:
+        model_label = "FunASR" if self._model_type == "funasr_nano" else "FunASR-MLT"
+        logger.info(
+            "Loading sherpa-onnx %s (threads=%d, language=%s, itn=%s)...",
+            model_label,
+            settings.sherpa_onnx_num_threads,
+            lang or "auto",
+            settings.sherpa_onnx_itn,
+        )
+        llm_path = model_dir / "llm_int8" / "llm.int8.onnx"
+        if not llm_path.is_file():
+            llm_path = model_dir / "llm.int8.onnx"
+
+        tok_dir = model_dir / "Qwen3-0.6B"
+        if not tok_dir.is_dir():
+            tok_dir = model_dir
+
+        self._recognizer = sherpa_onnx.OfflineRecognizer.from_funasr_nano(
+            encoder_adaptor=str(model_dir / "encoder_adaptor.int8.onnx"),
+            llm=str(llm_path),
+            embedding=str(model_dir / "embedding.int8.onnx"),
+            tokenizer=str(tok_dir),
+            num_threads=settings.sherpa_onnx_num_threads,
+            language=lang,
+            itn=settings.sherpa_onnx_itn,
+            debug=False,
+        )
+
+    def _init_qwen3_asr(self, sherpa_onnx, model_dir: Path) -> None:
+        logger.info(
+            "Loading sherpa-onnx Qwen3-ASR 0.6B (threads=%d)...",
+            settings.sherpa_onnx_num_threads,
+        )
+        # Qwen3-ASR uses feature_dim=128 (vs usual 80)
+        self._recognizer = sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
+            conv_frontend=str(model_dir / "conv_frontend.onnx"),
+            encoder=str(model_dir / "encoder.int8.onnx"),
+            decoder=str(model_dir / "decoder.int8.onnx"),
+            tokenizer=str(model_dir / "tokenizer"),
+            num_threads=settings.sherpa_onnx_num_threads,
+            feature_dim=128,
+            max_new_tokens=128,
+            temperature=1e-6,
+            top_p=0.8,
+            debug=False,
+        )
+
+    def _init_whisper(self, sherpa_onnx, model_dir: Path) -> None:
+        logger.info(
+            "Loading sherpa-onnx Whisper (threads=%d, language=%s, task=%s)...",
+            settings.sherpa_onnx_num_threads,
+            settings.sherpa_onnx_whisper_language,
+            settings.sherpa_onnx_whisper_task,
+        )
+        # Derive file prefix from model name.
+        # e.g. "sherpa-onnx-whisper-base.en" → prefix "base.en"
+        prefix = settings.sherpa_onnx_model
+        for pfx in ("sherpa-onnx-whisper-", "sherpa-onnx-"):
+            if prefix.startswith(pfx):
+                prefix = prefix[len(pfx):]
+                break
+
+        # Try int8 first, fall back to float32
+        encoder = model_dir / f"{prefix}-encoder.int8.onnx"
+        if not encoder.is_file():
+            encoder = model_dir / f"{prefix}-encoder.onnx"
+
+        decoder = model_dir / f"{prefix}-decoder.int8.onnx"
+        if not decoder.is_file():
+            decoder = model_dir / f"{prefix}-decoder.onnx"
+
+        tokens = model_dir / f"{prefix}-tokens.txt"
+
+        self._recognizer = sherpa_onnx.OfflineRecognizer.from_whisper(
+            encoder=str(encoder),
+            decoder=str(decoder),
+            tokens=str(tokens),
+            language=settings.sherpa_onnx_whisper_language,
+            task=settings.sherpa_onnx_whisper_task,
+            num_threads=settings.sherpa_onnx_num_threads,
+            tail_paddings=settings.sherpa_onnx_whisper_tail_paddings,
+            debug=False,
+        )
+
+    def _init_moonshine_v2(self, sherpa_onnx, model_dir: Path) -> None:
+        logger.info(
+            "Loading sherpa-onnx Moonshine V2 (threads=%d)...",
+            settings.sherpa_onnx_num_threads,
+        )
+        # Moonshine V2 models contain encoder_model.ort, decoder_model_merged.ort, tokens.txt
+        encoder = model_dir / "encoder_model.ort"
+        decoder = model_dir / "decoder_model_merged.ort"
+        tokens = model_dir / "tokens.txt"
+
+        self._recognizer = sherpa_onnx.OfflineRecognizer.from_moonshine_v2(
+            encoder=str(encoder),
+            decoder=str(decoder),
+            tokens=str(tokens),
+            num_threads=settings.sherpa_onnx_num_threads,
+            debug=False,
+        )
+
+    # ── Transcribe ──────────────────────────────────────────────────
+
+    def transcribe(self, audio: np.ndarray) -> tuple[str, float]:
+        t0 = time.monotonic()
+        stream = self._recognizer.create_stream()
+        stream.accept_waveform(settings.sample_rate, audio)
+        self._recognizer.decode_stream(stream)
+        text = stream.result.text.strip()
+        inference_ms = (time.monotonic() - t0) * 1000
+        return text, inference_ms
+
+    # ── Model download ──────────────────────────────────────────────
+
+    def _detect_model_type(self) -> str:
+        """Auto-detect model type from SHERPA_ONNX_MODEL name, or
+        use the configured SHERPA_ONNX_MODEL_TYPE as override."""
+        override = os.getenv("SHERPA_ONNX_MODEL_TYPE", "")
+        if override in self._MODEL_NAMES or override in ("whisper", "moonshine_v2"):
+            return override
+
+        model_name = settings.sherpa_onnx_model
+
+        # Check known moonshine v2 models first (direct name match)
+        if model_name in self._MOONSHINE_V2_MODELS:
+            return "moonshine_v2"
+
+        for mtype, mname in self._MODEL_NAMES.items():
+            if mname == model_name:
+                return mtype
+
+        # Pattern match fallback
+        if "moonshine" in model_name.lower():
+            return "moonshine_v2"
+        if "whisper" in model_name.lower():
+            return "whisper"
+        if "qwen3" in model_name.lower() or "qwen3_asr" in model_name.lower():
+            return "qwen3_asr"
+        if "mlt" in model_name.lower() and "funasr" in model_name.lower():
+            return "funasr_mlt_nano"
+        if "funasr" in model_name.lower():
+            return "funasr_nano"
+        return "sense_voice"
+
+    def _ensure_model(self) -> Path:
+        """Resolve model directory.
+
+        Priority:
+          1. SHERPA_ONNX_MODEL_DIR (if set and exists)
+          2. Cached model directory
+          3. Auto-download from GitHub
+        """
+        # 1. User-specified model dir
+        model_dir = settings.sherpa_onnx_model_dir
+        if model_dir:
+            p = Path(model_dir)
+            if p.is_dir():
+                logger.info("Using model from SHERPA_ONNX_MODEL_DIR=%s", p)
+                return p
+            logger.warning("SHERPA_ONNX_MODEL_DIR=%s not found, falling back", model_dir)
+
+        # 2. Cached model directory
+        if self._model_type in ("whisper", "moonshine_v2"):
+            model_name = settings.sherpa_onnx_model
+        else:
+            model_name = self._MODEL_NAMES[self._model_type]
+        cache = settings.model_cache_dir / "sherpa-onnx"
+        cached_dir = cache / model_name
+        if cached_dir.is_dir():
+            return cached_dir
+
+        # 3. Auto-download
+        url = f"{_SHERTA_MODEL_URL}/{model_name}.tar.bz2"
+        archive = cache / f"{model_name}.tar.bz2"
+        cache.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Downloading sherpa-onnx model from %s ...", url)
+        t0 = time.time()
+        with requests.get(url, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("content-length", 0))
+            downloaded = 0
+            with open(archive, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        pct = downloaded / total * 100
+                        logger.info("  Download: %.0f%% (%d MB)", pct, downloaded // 1024 // 1024)
+        logger.info("Downloaded in %.1fs, extracting...", time.time() - t0)
+
+        with tarfile.open(archive, "r:bz2") as tar:
+            tar.extractall(path=cache)
+        archive.unlink()
+
+        logger.info("Model extracted to %s", cached_dir)
+        return cached_dir
+
+
+# ── Engine ───────────────────────────────────────────────────────────
+
+class ASREngine:
+    """Singleton wrapper around the sherpa-onnx backend."""
+
+    _instance: Optional["ASREngine"] = None
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        if hasattr(self, "_initialized") and self._initialized:
+            return
+        self._backend: Optional[_SherpaOnnxBackend] = None
+        self._executor = ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="sherpa",
+        )
+        self._initialized = False
+
+    def load(self) -> None:
+        """Load the model. Called once at startup."""
+        if self._backend is not None:
+            return
+        self._backend = _SherpaOnnxBackend()
+        self._initialized = True
+
+    def transcribe(self, audio: np.ndarray) -> tuple[str, float]:
+        """Run transcription.
+
+        Args:
+            audio: 16kHz mono float32, values in [-1, 1].
+
+        Returns:
+            Tuple of (text, inference_time_ms).
+        """
+        if self._backend is None:
+            raise RuntimeError("ASR engine not loaded. Call load() first.")
+
+        if len(audio) == 0:
+            return "", 0.0
+
+        text, inference_ms = self._backend.transcribe(audio)
+        logger.debug(
+            "Transcribed %.2fs audio -> '%s' (%.1fms)",
+            len(audio) / settings.sample_rate,
+            text,
+            inference_ms,
+        )
+        return text, inference_ms
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._backend is not None
+
+    @property
+    def executor(self) -> ThreadPoolExecutor:
+        return self._executor
