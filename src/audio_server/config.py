@@ -1,4 +1,4 @@
-"""Configuration management for asr-server."""
+"""Configuration management for audio-server."""
 
 import os
 from dataclasses import dataclass, field
@@ -129,7 +129,7 @@ class Settings:
     def model_cache_dir(self) -> Path:
         """Directory for caching downloaded models."""
         raw = os.getenv("MODEL_CACHE_DIR", "")
-        return Path(raw) if raw else Path.home() / ".cache" / "asr-server"
+        return Path(raw) if raw else Path.home() / ".cache" / "audio-server"
 
 
 settings = Settings()

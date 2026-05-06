@@ -1,8 +1,9 @@
-# ASR Server
+# Audio Server
+流式 ASR / TTS 服务，面向嵌入式语音助手场景，支持多种后端引擎。
 
 流式 ASR 服务，面向嵌入式语音助手场景，支持多种后端引擎。
 
-> 🎯 目标硬件：4核 A53，4GB RAM，ARM64 开发板
+> 🎯 目标硬件：4核 A72，4GB RAM，ARM64 开发板
 
 ## 架构
 
@@ -140,7 +141,7 @@ cp .env.example .env
 | **服务器** | `HOST` | `0.0.0.0` | 监听地址 |
 | | `PORT` | `8000` | 监听端口 |
 | | `MAX_CONNECTIONS` | `4` | 最大并发连接数 |
-| **缓存** | `MODEL_CACHE_DIR` | `~/.cache/asr-server` | 模型下载目录 |
+| **缓存** | `MODEL_CACHE_DIR` | `~/.cache/audio-server` | 模型下载目录 |
 ---
 
 ## TTS (Text-to-Speech)
@@ -195,7 +196,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 - `matcha-icefall-zh-en` 输出 **16kHz 单声道** WAV
 - `voice` 参数对应 `sid`（说话人 ID），当前模型仅支持 `0`
 - `speed` 范围 0.5-2.0
-- 首次使用自动下载模型到 `~/.cache/asr-server/sherpa-onnx/`
+- 首次使用自动下载模型到 `~/.cache/audio-server/sherpa-onnx/`
 
 ---
 

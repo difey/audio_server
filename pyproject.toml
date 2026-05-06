@@ -1,5 +1,5 @@
 [project]
-name = "asr-server"
+name = "audio-server"
 version = "0.1.0"
 description = "OpenAI-compatible streaming ASR service"
 readme = "README.md"

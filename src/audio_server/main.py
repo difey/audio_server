@@ -1,4 +1,4 @@
-"""ASR server FastAPI application entry point."""
+"""Audio server FastAPI application entry point."""
 
 import logging
 import sys
@@ -22,7 +22,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
-logger = logging.getLogger("asr_server")
+logger = logging.getLogger("audio_server")
 
 # ── ASR Engine (global singleton) ────────────────────────────────────
 _asr_engine = ASREngine()
@@ -56,7 +56,7 @@ def _patch_webrtcvad():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    logger.info("Starting ASR server...")
+    logger.info("Starting Audio server...")
 
     if settings.asr_enabled:
         _patch_webrtcvad()
@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
 
 
 # ── App ──────────────────────────────────────────────────────────────
-app = FastAPI(title="ASR Server", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Audio Server", version="0.1.0", lifespan=lifespan)
 
 # ── TTS request model ────────────────────────────────────────────────
 
@@ -183,7 +183,7 @@ async def serve_frontend(full_path: str = ""):
 
     if not STATIC_DIR_EXISTS:
         return {
-            "service": "ASR Server",
+            "service": "Audio Server",
             "model": settings.sherpa_onnx_model,
             "status": "running",
             "ws_endpoint": "/ws/transcribe",
@@ -241,7 +241,7 @@ async def websocket_endpoint(ws: WebSocket):
 # ── Entry point ──────────────────────────────────────────────────────
 def main():
     uvicorn.run(
-        "asr_server.main:app",
+        "audio_server.main:app",
         host=settings.host,
         port=settings.port,
         log_level="info",
