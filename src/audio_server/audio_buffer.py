@@ -11,7 +11,8 @@ class AudioBuffer:
     """Buffer for accumulating Int16 PCM audio chunks.
 
     Accumulates raw Int16 bytes and provides methods to
-    convert to float32 numpy arrays for whisper inference.
+    convert to float32 numpy arrays for ASR inference.
+    convert to float32 numpy arrays for ASR inference.
     """
 
     def __init__(self, max_duration_sec: float = 30.0, sample_rate: int = 16000):

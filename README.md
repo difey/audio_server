@@ -1,7 +1,6 @@
 # Audio Server
-流式 ASR / TTS 服务，面向嵌入式语音助手场景，支持多种后端引擎。
 
-流式 ASR 服务，面向嵌入式语音助手场景，支持多种后端引擎。
+流式 ASR / TTS 服务，面向嵌入式语音助手场景，支持 sherpa-onnx 引擎。
 
 > 🎯 目标硬件：4核 A72，4GB RAM，ARM64 开发板
 
@@ -13,7 +12,7 @@
    → WebSocket Binary (Int16, 16kHz, 30ms/帧)
    → FastAPI 服务端
      → webrtcvad 语音检测
-     → ASR 引擎 (sherpa-onnx / faster-whisper / openai-whisper)
+     → ASR 引擎 (sherpa-onnx)
      → 每 400ms 发 interim 中间结果
    → WebSocket JSON ← 转写结果 + 延迟指标
 ```
@@ -32,7 +31,7 @@
 uv sync
 
 # 2. 启动服务
-uv run python -m bondi_whisper.main
+uv run python -m audio_server.main
 
 # 3. 连接 WebSocket ws://<host>:8000/ws/transcribe
 ```
@@ -60,11 +59,7 @@ uv run python scripts/test_client.py --mic
 
 ---
 
-## 后端引擎
-
-通过 `WHISPER_BACKEND` 切换。不同后端支持不同的模型和安装方式。
-
-### sherpa-onnx（推荐 ✅）
+## ASR 后端（sherpa-onnx）
 
 基于 ONNX Runtime 的轻量引擎，速度最快，适合开发板。
 
@@ -73,42 +68,9 @@ uv run python scripts/test_client.py --mic
 | **SenseVoice** | `model.int8.onnx` + `tokens.txt` | zh/en/ja/ko/yue | ~228MB | `SHERPA_ONNX_MODEL_TYPE=sense_voice` |
 | **FunASR Nano** | `encoder_adaptor.int8.onnx` + llm + embedding + tokenizer | zh/en/ja | ~150MB | `SHERPA_ONNX_MODEL_TYPE=funasr_nano` |
 | **Qwen3-ASR 0.6B** | `conv_frontend.onnx` + encoder + decoder + tokenizer | 多语言 | ~600MB | `SHERPA_ONNX_MODEL_TYPE=qwen3_asr` |
+| **Moonshine V2** | `encoder_model.ort` + `decoder_model_merged.ort` + `tokens.txt` | zh/en/es | ~50MB | `SHERPA_ONNX_MODEL_TYPE=moonshine_v2` |
 
-```bash
-uv sync --extra sherpa-onnx
-```
-
-模型自动下载到 `~/.cache/bondi-whisper/sherpa-onnx/`。
-
-### faster-whisper（默认）
-
-基于 CTranslate2 的优化版 whisper，速度快、内存低。
-
-| 模型 | 内存 | 速度 |
-|------|------|------|
-| tiny | ~150MB | 🚀 |
-| base | ~300MB | ⚡ |
-| small | ~1.5GB | ✅ |
-
-```env
-WHISPER_BACKEND=faster_whisper
-WHISPER_MODEL=tiny
-WHISPER_COMPUTE_TYPE=int8     # CPU: int8 | float32；CUDA: float16
-```
-
-### openai-whisper（原版 PyTorch）
-
-原始 whisper 实现，准确率参考基准。
-
-```bash
-uv sync --extra whisper
-```
-
-```env
-WHISPER_BACKEND=openai_whisper
-WHISPER_MODEL=base
-WHISPER_DEVICE=cpu
-```
+模型自动下载到 `~/.cache/audio-server/sherpa-onnx/`。
 
 ---
 
@@ -126,7 +88,7 @@ cp .env.example .env
 |------|------|--------|------|
 | **功能开关** | `ASR_ENABLED` | `true` | 启用 ASR（设为 `false` 可只跑 TTS） |
 | | `TTS_ENABLED` | `false` | 启用 TTS |
-| **ASR 通用** | `SHERPA_ONNX_MODEL_TYPE` | 自动检测 | `sense_voice` / `funasr_nano` / `funasr_mlt_nano` / `qwen3_asr` / `whisper` / `moonshine_v2` |
+| **ASR 通用** | `SHERPA_ONNX_MODEL_TYPE` | 自动检测 | `sense_voice` / `funasr_nano` / `funasr_mlt_nano` / `qwen3_asr` / `moonshine_v2` |
 | | `SHERPA_ONNX_MODEL` | `sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25` | 模型名称，首次自动下载 |
 | | `SHERPA_ONNX_MODEL_DIR` | `""` | 本地模型目录（留空自动下载）|
 | | `SHERPA_ONNX_NUM_THREADS` | `2` | 推理线程数 |
@@ -259,25 +221,26 @@ def on_final(msg):
 ## 项目结构
 
 ```
-bondi-whisper/
-├── pyproject.toml              # Python 项目配置 (uv)
-├── .env                        # 环境变量配置
-├── src/bondi_whisper/
-│   ├── main.py                 # FastAPI 入口 + WebSocket 端点
-│   ├── config.py               # 配置管理
-│   ├── asr_engine.py           # ASR 引擎 (多后端)
-│   ├── vad.py                  # 语音活动检测 (webrtcvad)
-│   ├── audio_buffer.py         # 环形音频缓冲区
-│   ├── session.py              # WebSocket 会话管理 + VAD 状态机
-│   └── static/                 # 构建好的前端文件 (可选)
-├── frontend/                   # Vue 3 前端源码 (可选)
+audio-server/
+├── pyproject.toml                  # Python 项目配置 (uv)
+├── .env                            # 环境变量配置
+├── src/audio_server/
+│   ├── main.py                     # FastAPI 入口 + WebSocket 端点
+│   ├── config.py                   # 配置管理
+│   ├── asr_engine.py               # ASR 引擎 (sherpa-onnx)
+│   ├── vad.py                      # 语音活动检测 (webrtcvad)
+│   ├── audio_buffer.py             # 环形音频缓冲区
+│   ├── session.py                  # WebSocket 会话管理 + VAD 状态机
+│   ├── tts_engine.py               # TTS 引擎 (sherpa-onnx)
+│   └── static/                     # 构建好的前端文件 (可选)
+├── frontend/                       # Vue 3 前端源码 (可选)
 │   ├── src/components/
 │   │   ├── AudioRecorder.vue       # 麦克风采集 (AudioWorklet)
 │   │   └── TranscriptionDisplay.vue # 转写展示 + 延迟指标
 │   └── public/audio-processor.js   # AudioWorkletProcessor
 └── scripts/
-    ├── test_client.py          # Python 命令行测试客户端
-    └── fix_vad.py              # webrtcvad 兼容性修复
+    ├── test_client.py              # Python 命令行测试客户端
+    └── fix_vad.py                  # webrtcvad 兼容性修复
 ```
 
 ---
@@ -287,23 +250,20 @@ bondi-whisper/
 开发板只需启动 WebSocket 服务，**不需要前端**。
 
 ```bash
-# 1. 克隆项目
-git clone <repo>
-cd bondi-whisper
+# 1. 进入项目目录
+cd audio-server
 
-# 2. 安装依赖 + 选装后端
+# 2. 安装依赖
 uv sync
-uv sync --extra sherpa-onnx   # 推荐
 
 # 3. 配置 .env
-WHISPER_BACKEND=sherpa_onnx
 SHERPA_ONNX_MODEL_TYPE=funasr_nano  # 或 sense_voice / qwen3_asr
 
-# 4. 启动
-uv run python -m bondi_whisper.main
+# 4. 启动（首次自动下载模型）
+uv run python -m audio_server.main
 ```
 
-> 💡 无外网时，在有网机器上先下载模型到 `~/.cache/bondi-whisper/sherpa-onnx/`，然后复制到开发板。
+> 💡 无外网时，在有网机器上先下载模型到 `~/.cache/audio-server/sherpa-onnx/`，然后复制到开发板。
 
 ### macOS 注意
 
@@ -327,8 +287,6 @@ ln -sf .venv/lib/python3.11/site-packages/onnxruntime/capi/libonnxruntime.*.dyli
 | sherpa-onnx | SenseVoice int8 | ~30ms | 228MB |
 | sherpa-onnx | FunASR Nano int8 | ~50ms | 150MB |
 | sherpa-onnx | Qwen3-ASR 0.6B int8 | ~200ms | 600MB |
-| faster-whisper | tiny int8 | ~110ms | 75MB |
-| openai-whisper | base fp32 | ~600ms | 145MB |
 
 ### 开发板预估（4核 A53）
 

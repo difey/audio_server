@@ -45,7 +45,7 @@ class Settings:
     )
 
     # ── sherpa-onnx backend ──
-    # Model types: sense_voice | funasr_nano | funasr_mlt_nano | qwen3_asr | whisper | moonshine_v2
+    # Model types: sense_voice | funasr_nano | funasr_mlt_nano | qwen3_asr | moonshine_v2
     # Auto-detected from model name, or override via SHERPA_ONNX_MODEL_TYPE.
     sherpa_onnx_model: str = field(
         default_factory=lambda: os.getenv(
@@ -64,18 +64,6 @@ class Settings:
     )
     sherpa_onnx_itn: bool = field(
         default_factory=lambda: os.getenv("SHERPA_ONNX_ITN", "true").lower() == "true"
-    )
-
-    # ── sherpa-onnx whisper-specific ──
-    # Only used when model type is "whisper".
-    sherpa_onnx_whisper_language: str = field(
-        default_factory=lambda: os.getenv("SHERPA_ONNX_WHISPER_LANGUAGE", "zh")
-    )
-    sherpa_onnx_whisper_task: str = field(
-        default_factory=lambda: os.getenv("SHERPA_ONNX_WHISPER_TASK", "transcribe")
-    )
-    sherpa_onnx_whisper_tail_paddings: int = field(
-        default_factory=lambda: int(os.getenv("SHERPA_ONNX_WHISPER_TAIL_PADDINGS", "-1"))
     )
 
     @property

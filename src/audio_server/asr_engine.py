@@ -23,7 +23,7 @@ _SHERTA_MODEL_URL = (
 # ── sherpa-onnx backend ────────────────────────────────────────────
 
 class _SherpaOnnxBackend:
-    """Wrapper around sherpa-onnx (SenseVoice / FunASR Nano / Qwen3-ASR / Whisper / Moonshine V2).
+    """Wrapper around sherpa-onnx (SenseVoice / FunASR Nano / Qwen3-ASR / Moonshine V2).
 
     Auto-downloads the model from GitHub releases on first load.
     Model type is auto-detected from model name, or override via
@@ -42,10 +42,6 @@ class _SherpaOnnxBackend:
         sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25
         → conv_frontend.onnx, encoder.int8.onnx, decoder.int8.onnx,
           tokenizer/ (tokenizer dir)
-
-    Whisper:
-        sherpa-onnx-whisper-{size}
-        → {size}-encoder.int8.onnx, {size}-decoder.int8.onnx, {size}-tokens.txt
 
     Moonshine V2:
         sherpa-onnx-moonshine-base-{lang}-quantized-2026-02-27
@@ -88,8 +84,6 @@ class _SherpaOnnxBackend:
             self._init_funasr_nano(sherpa_onnx, model_dir, lang)
         elif self._model_type == "qwen3_asr":
             self._init_qwen3_asr(sherpa_onnx, model_dir)
-        elif self._model_type == "whisper":
-            self._init_whisper(sherpa_onnx, model_dir)
         elif self._model_type == "moonshine_v2":
             self._init_moonshine_v2(sherpa_onnx, model_dir)
         else:
@@ -161,43 +155,6 @@ class _SherpaOnnxBackend:
             debug=False,
         )
 
-    def _init_whisper(self, sherpa_onnx, model_dir: Path) -> None:
-        logger.info(
-            "Loading sherpa-onnx Whisper (threads=%d, language=%s, task=%s)...",
-            settings.sherpa_onnx_num_threads,
-            settings.sherpa_onnx_whisper_language,
-            settings.sherpa_onnx_whisper_task,
-        )
-        # Derive file prefix from model name.
-        # e.g. "sherpa-onnx-whisper-base.en" → prefix "base.en"
-        prefix = settings.sherpa_onnx_model
-        for pfx in ("sherpa-onnx-whisper-", "sherpa-onnx-"):
-            if prefix.startswith(pfx):
-                prefix = prefix[len(pfx):]
-                break
-
-        # Try int8 first, fall back to float32
-        encoder = model_dir / f"{prefix}-encoder.int8.onnx"
-        if not encoder.is_file():
-            encoder = model_dir / f"{prefix}-encoder.onnx"
-
-        decoder = model_dir / f"{prefix}-decoder.int8.onnx"
-        if not decoder.is_file():
-            decoder = model_dir / f"{prefix}-decoder.onnx"
-
-        tokens = model_dir / f"{prefix}-tokens.txt"
-
-        self._recognizer = sherpa_onnx.OfflineRecognizer.from_whisper(
-            encoder=str(encoder),
-            decoder=str(decoder),
-            tokens=str(tokens),
-            language=settings.sherpa_onnx_whisper_language,
-            task=settings.sherpa_onnx_whisper_task,
-            num_threads=settings.sherpa_onnx_num_threads,
-            tail_paddings=settings.sherpa_onnx_whisper_tail_paddings,
-            debug=False,
-        )
-
     def _init_moonshine_v2(self, sherpa_onnx, model_dir: Path) -> None:
         logger.info(
             "Loading sherpa-onnx Moonshine V2 (threads=%d)...",
@@ -233,7 +190,7 @@ class _SherpaOnnxBackend:
         """Auto-detect model type from SHERPA_ONNX_MODEL name, or
         use the configured SHERPA_ONNX_MODEL_TYPE as override."""
         override = os.getenv("SHERPA_ONNX_MODEL_TYPE", "")
-        if override in self._MODEL_NAMES or override in ("whisper", "moonshine_v2"):
+        if override in self._MODEL_NAMES or override == "moonshine_v2":
             return override
 
         model_name = settings.sherpa_onnx_model
@@ -249,8 +206,6 @@ class _SherpaOnnxBackend:
         # Pattern match fallback
         if "moonshine" in model_name.lower():
             return "moonshine_v2"
-        if "whisper" in model_name.lower():
-            return "whisper"
         if "qwen3" in model_name.lower() or "qwen3_asr" in model_name.lower():
             return "qwen3_asr"
         if "mlt" in model_name.lower() and "funasr" in model_name.lower():
@@ -277,7 +232,7 @@ class _SherpaOnnxBackend:
             logger.warning("SHERPA_ONNX_MODEL_DIR=%s not found, falling back", model_dir)
 
         # 2. Cached model directory
-        if self._model_type in ("whisper", "moonshine_v2"):
+        if self._model_type == "moonshine_v2":
             model_name = settings.sherpa_onnx_model
         else:
             model_name = self._MODEL_NAMES[self._model_type]
