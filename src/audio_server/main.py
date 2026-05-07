@@ -121,6 +121,7 @@ async def text_to_speech(req: TTSRequest):
     Supported models:
     - `matcha-icefall-zh-en` — Matcha-TTS (zh/en)
     - `vits-piper-zh_CN-chaowen-medium` — VITS Piper Chinese (chaowen)
+    - `vits-piper-en_GB-jenny_dioco-medium` — VITS Piper English UK (jenny_dioco)
 
     Supported response formats:
     - `wav` — WAV file (audio/wav)

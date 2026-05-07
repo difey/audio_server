@@ -45,6 +45,13 @@ _TTS_MODELS = {
         "lexicon": "lexicon.txt",
         "rule_fsts": ["phone.fst", "date.fst", "number.fst"],
     },
+    "vits-piper-en_GB-jenny_dioco-medium": {
+        "type": "vits",
+        "archive": "vits-piper-en_GB-jenny_dioco-medium.tar.bz2",
+        "model_file": "en_GB-jenny_dioco-medium.onnx",
+        "tokens": "tokens.txt",
+        "data_dir": "espeak-ng-data",
+    },
 }
 
 
