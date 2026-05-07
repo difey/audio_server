@@ -1,0 +1,112 @@
+# Export FunASR-MLT-Nano to ONNX and publish as GitHub Release
+#
+# Trigger: manual (workflow_dispatch) or on push to a branch named "export-*"
+#
+# What it does:
+#   1. Check out the FunASR-nano-onnx export scripts
+#   2. Download the original Fun-ASR-MLT-Nano-2512 model from HuggingFace
+#   3. Export encoder_adaptor, embedding, and LLM to ONNX (int8)
+#   4. Package into tar.bz2
+#   5. Upload to GitHub Release (tag: asr-models)
+#
+# After the release is created, the ASR server can download the model
+# by setting:
+#   SHERPA_ONNX_MODEL_BASE_URL=https://github.com/<owner>/asr-server/releases/download/asr-models
+#   SHERPA_ONNX_MODEL_TYPE=funasr_mlt_nano
+#   SHERPA_ONNX_MODEL=sherpa-onnx-funasr-mlt-nano-int8-<date>
+
+name: Export FunASR-MLT-Nano
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_name:
+        description: 'Output model name (default: auto-generated with date)'
+        required: false
+        type: string
+
+concurrency:
+  group: export-mlt-model
+  cancel-in-progress: true
+
+env:
+  MODEL_NAME: sherpa-onnx-funasr-mlt-nano-int8-${{ github.run_id }}
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out export scripts (FunASR-nano-onnx)
+        uses: actions/checkout@v4
+        with:
+          repository: Wasser1462/FunASR-nano-onnx
+          path: export-scripts
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install onnx onnxruntime huggingface_hub
+          pip install -r export-scripts/requirements.txt
+
+      - name: Download original Fun-ASR-MLT-Nano-2512 model
+        run: |
+          huggingface-cli download \
+            FunAudioLLM/Fun-ASR-MLT-Nano-2512 \
+            --local-dir Fun-ASR-MLT-Nano-2512 \
+            --local-dir-use-symlinks False
+          echo "Model downloaded:"
+          ls -lh Fun-ASR-MLT-Nano-2512/
+
+      - name: Export to ONNX
+        run: |
+          cd export-scripts/scripts
+          # Patch run.sh with the MLT model path
+          sed -i "s|fun_asr_path=/path/to/Fun-ASR-Nano-2512|fun_asr_path=$(pwd)/../../Fun-ASR-MLT-Nano-2512|" run.sh
+          cat run.sh
+          bash run.sh
+          echo "=== Export complete ==="
+          ls -lh ../../models/
+
+      - name: Package model
+        run: |
+          mkdir -p $MODEL_NAME
+          # Copy exported ONNX files (handle both int8 and fp32 variants)
+          if [ -d "export-scripts/models/llm_int8" ]; then
+            cp -r export-scripts/models/encoder_adaptor.int8.onnx $MODEL_NAME/
+            cp -r export-scripts/models/embedding.int8.onnx $MODEL_NAME/
+            cp -r export-scripts/models/llm_int8 $MODEL_NAME/
+          else
+            cp -r export-scripts/models/*.onnx $MODEL_NAME/
+          fi
+          # Copy tokenizer
+          cp -r export-scripts/models/Qwen3-0.6B $MODEL_NAME/
+          # Add metadata
+          echo "Exported from FunAudioLLM/Fun-ASR-MLT-Nano-2512" > $MODEL_NAME/README.md
+          echo "Date: $(date -u +%Y-%m-%d)" >> $MODEL_NAME/README.md
+
+          # Compress
+          tar -cjf $MODEL_NAME.tar.bz2 $MODEL_NAME/
+          ls -lh $MODEL_NAME.tar.bz2
+
+      - name: Create / Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: asr-models
+          name: ASR Models
+          body: |
+            Pre-built ONNX models for the ASR Server.
+
+            ## ${{ env.MODEL_NAME }}
+
+            - Source: FunAudioLLM/Fun-ASR-MLT-Nano-2512
+            - Format: sherpa-onnx (encoder_adaptor + embedding + llm + tokenizer)
+            - Quantization: int8
+            - Date: $(date -u +%Y-%m-%d)
+          files: ${{ env.MODEL_NAME }}.tar.bz2
+          prerelease: false
+          make_latest: false

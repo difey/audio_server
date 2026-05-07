@@ -56,6 +56,12 @@ class Settings:
     sherpa_onnx_model_dir: str = field(
         default_factory=lambda: os.getenv("SHERPA_ONNX_MODEL_DIR", "")
     )
+    sherpa_onnx_model_base_url: str = field(
+        default_factory=lambda: os.getenv(
+            "SHERPA_ONNX_MODEL_BASE_URL",
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models",
+        )
+    )
     sherpa_onnx_num_threads: int = field(
         default_factory=lambda: int(os.getenv("SHERPA_ONNX_NUM_THREADS", "2"))
     )

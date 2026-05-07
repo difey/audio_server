@@ -15,9 +15,15 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-_SHERTA_MODEL_URL = (
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models"
-)
+
+def _model_base_url() -> str:
+    """Return the base URL for downloading sherpa-onnx models.
+
+    Defaults to the official sherpa-onnx releases, but can be overridden
+    via SHERPA_ONNX_MODEL_BASE_URL to point to a custom GitHub Release
+    (e.g., your own repo's releases for custom models).
+    """
+    return settings.sherpa_onnx_model_base_url.rstrip("/")
 
 
 # ── sherpa-onnx backend ────────────────────────────────────────────
@@ -55,11 +61,13 @@ class _SherpaOnnxBackend:
     _MOONSHINE_V2_EN = "sherpa-onnx-moonshine-base-en-quantized-2026-02-27"
     _MOONSHINE_V2_ES = "sherpa-onnx-moonshine-base-es-quantized-2026-02-27"
 
-    # funasr_mlt_nano shares same file structure as funasr_nano
+    # funasr_mlt_nano shares same file structure as funasr_nano.
+    # Its model name is dynamic (date-stamped by CI), so we read it
+    # from settings.sherpa_onnx_model rather than a hardcoded constant.
     _MODEL_NAMES = {
         "sense_voice": _SENSE_VOICE,
         "funasr_nano": _FUNASR_NANO,
-        "funasr_mlt_nano": _FUNASR_NANO,  # same structure, different weights
+        "funasr_mlt_nano": None,  # uses SHERPA_ONNX_MODEL
         "qwen3_asr": _QWEN3_ASR,
         "moonshine_v2": _MOONSHINE_V2_ZH,
     }
@@ -232,17 +240,18 @@ class _SherpaOnnxBackend:
             logger.warning("SHERPA_ONNX_MODEL_DIR=%s not found, falling back", model_dir)
 
         # 2. Cached model directory
-        if self._model_type == "moonshine_v2":
+        mapped = self._MODEL_NAMES.get(self._model_type)
+        if mapped is None or self._model_type == "moonshine_v2":
             model_name = settings.sherpa_onnx_model
         else:
-            model_name = self._MODEL_NAMES[self._model_type]
+            model_name = mapped
         cache = settings.model_cache_dir / "sherpa-onnx"
         cached_dir = cache / model_name
         if cached_dir.is_dir():
             return cached_dir
 
         # 3. Auto-download
-        url = f"{_SHERTA_MODEL_URL}/{model_name}.tar.bz2"
+        url = f"{_model_base_url()}/{model_name}.tar.bz2"
         archive = cache / f"{model_name}.tar.bz2"
         cache.mkdir(parents=True, exist_ok=True)
 
