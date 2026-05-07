@@ -202,7 +202,6 @@ async def text_to_speech(req: TTSRequest):
 async def transcribe_file(
     file: UploadFile = File(...),
     response_format: str = Form("text"),
-    language: str | None = Form(None),
 ):
     """Transcribe an audio file (WAV, MP3, FLAC, OGG, etc.).
 
@@ -245,6 +244,16 @@ async def transcribe_file(
     text, inference_ms = _asr_engine.transcribe(audio)
 
     duration_sec = len(audio) / 16000
+    rtf = inference_ms / (duration_sec * 1000) if duration_sec > 0 else 0
+
+    logger.info(
+        "ASR file (%s) done: text=%.80r duration=%.2fs inference=%.0fms rtf=%.2f",
+        Path(file.filename or "audio.wav").name,
+        text,
+        duration_sec,
+        inference_ms,
+        rtf,
+    )
 
     if response_format == "json":
         return {
