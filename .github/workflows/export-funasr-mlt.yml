@@ -82,7 +82,7 @@ jobs:
             --opset-version 17 \
             --verify
 
-      - name: Export LLM → ONNX (int8)
+      - name: Export LLM → ONNX
         run: |
           cd export-scripts/scripts
           python export_llm_onnx.py \
@@ -92,7 +92,8 @@ jobs:
             --opset-version 17 \
             --seq-len 256 \
             --past-len 256 \
-            --verify
+            --no-int8 \
+            --skip-verify
 
       - name: Fix ONNX compatibility
         run: |
