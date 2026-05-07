@@ -322,18 +322,17 @@ class _SherpaOnnxBackend:
     ) -> None:
         """Download model as multiple parts (files + archives).
 
-        Each part is downloaded from ``{base_url}/{model_name}_{part_name}``.
+        Each part is downloaded from ``{base_url}/{part_name}``.
         Archives are extracted in-place within `cached_dir`.
         """
         cached_dir.mkdir(parents=True, exist_ok=True)
         base_url = _model_base_url()
 
         for part_name, is_archive, extract_subdir in parts:
-            full_name = f"{model_name}_{part_name}"
-            url = f"{base_url}/{full_name}"
+            url = f"{base_url}/{part_name}"
             dest = cached_dir / part_name
 
-            logger.info("Downloading part %s ...", full_name)
+            logger.info("Downloading part %s ...", part_name)
             self._do_download(url, dest)
 
             if is_archive:
