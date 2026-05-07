@@ -79,6 +79,22 @@ class _SherpaOnnxBackend:
         _MOONSHINE_V2_ES,
     }
 
+    # Parts manifest for multi-file model downloads (to stay under GitHub's
+    # 2GB per-file limit). Each entry:
+    #   (part_filename_in_release, is_archive, extract_subdir)
+    #   - part_filename: basename as uploaded to GitHub Release
+    #   - is_archive: True = .tar.bz2 to extract after download
+    #   - extract_subdir: subdirectory to extract into (None = flat)
+    # The full download URL is: {base_url}/{model_name}_{part_filename}
+    _PARTS_MANIFEST: dict[str, list[tuple[str, bool, str | None]]] = {
+        "funasr_mlt_nano": [
+            ("encoder_adaptor.int8.onnx", False, None),
+            ("embedding.int8.onnx", False, None),
+            ("llm_int8.tar.bz2", True, None),
+            ("Qwen3-0.6B.tar.bz2", True, None),
+        ],
+    }
+
     def __init__(self):
         import sherpa_onnx
 
@@ -247,43 +263,108 @@ class _SherpaOnnxBackend:
                 return p
             logger.warning("SHERPA_ONNX_MODEL_DIR=%s not found, falling back", model_dir)
 
-        # 2. Cached model directory
+        # 2. Resolve model name
         mapped = self._MODEL_NAMES.get(self._model_type)
         if mapped is None or self._model_type == "moonshine_v2":
             model_name = settings.sherpa_onnx_model
         else:
             model_name = mapped
+
         cache = settings.model_cache_dir / "sherpa-onnx"
         cached_dir = cache / model_name
+
+        # Check cache
         if cached_dir.is_dir():
-            return cached_dir
+            required = self._minimal_dir_content()
+            if all((cached_dir / r).exists() for r in required):
+                return cached_dir
+            logger.warning("Cache incomplete for %s, re-downloading", model_name)
 
         # 3. Auto-download
+        cache.mkdir(parents=True, exist_ok=True)
+        parts = self._PARTS_MANIFEST.get(self._model_type)
+
+        if parts:
+            self._download_parts(model_name, cache, cached_dir, parts)
+        else:
+            self._download_single_archive(model_name, cache, cached_dir)
+
+        return cached_dir
+
+    def _minimal_dir_content(self) -> list[str]:
+        """Return a list of files/dirs that must exist for a valid model dir."""
+        if self._model_type in ("funasr_nano", "funasr_mlt_nano"):
+            return ["encoder_adaptor.int8.onnx", "embedding.int8.onnx", "Qwen3-0.6B"]
+        if self._model_type == "qwen3_asr":
+            return ["conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx"]
+        if self._model_type == "moonshine_v2":
+            return ["encoder_model.ort"]
+        # sense_voice
+        return ["model.int8.onnx"]
+
+    def _download_single_archive(
+        self, model_name: str, cache: Path, cached_dir: Path
+    ) -> None:
+        """Download a single .tar.bz2 archive and extract it."""
         url = f"{_model_base_url()}/{model_name}.tar.bz2"
         archive = cache / f"{model_name}.tar.bz2"
-        cache.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Downloading sherpa-onnx model from %s ...", url)
+        self._do_download(url, archive)
+
+        logger.info("Extracting %s...", archive.name)
+        with tarfile.open(archive, "r:bz2") as tar:
+            tar.extractall(path=cache)
+        archive.unlink()
+        logger.info("Model extracted to %s", cached_dir)
+
+    def _download_parts(
+        self, model_name: str, cache: Path, cached_dir: Path, parts: list[tuple[str, bool, str | None]]
+    ) -> None:
+        """Download model as multiple parts (files + archives).
+
+        Each part is downloaded from ``{base_url}/{model_name}_{part_name}``.
+        Archives are extracted in-place within `cached_dir`.
+        """
+        cached_dir.mkdir(parents=True, exist_ok=True)
+        base_url = _model_base_url()
+
+        for part_name, is_archive, extract_subdir in parts:
+            full_name = f"{model_name}_{part_name}"
+            url = f"{base_url}/{full_name}"
+            dest = cached_dir / part_name
+
+            logger.info("Downloading part %s ...", full_name)
+            self._do_download(url, dest)
+
+            if is_archive:
+                logger.info("Extracting %s...", dest.name)
+                target = cached_dir / extract_subdir if extract_subdir else cached_dir
+                target.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(dest, "r:bz2") as tar:
+                    tar.extractall(path=target)
+                dest.unlink()
+
+    @staticmethod
+    def _do_download(url: str, dest: Path) -> None:
+        """Download a single file from *url* to *dest* with progress logging."""
+        logger.info("Downloading from %s ...", url)
         t0 = time.time()
         with requests.get(url, stream=True, timeout=300) as r:
             r.raise_for_status()
             total = int(r.headers.get("content-length", 0))
             downloaded = 0
-            with open(archive, "wb") as f:
+            with open(dest, "wb") as f:
                 for chunk in r.iter_content(chunk_size=65536):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total:
                         pct = downloaded / total * 100
-                        logger.info("  Download: %.0f%% (%d MB)", pct, downloaded // 1024 // 1024)
-        logger.info("Downloaded in %.1fs, extracting...", time.time() - t0)
-
-        with tarfile.open(archive, "r:bz2") as tar:
-            tar.extractall(path=cache)
-        archive.unlink()
-
-        logger.info("Model extracted to %s", cached_dir)
-        return cached_dir
+                        logger.info(
+                            "  Download: %.0f%% (%d MB)",
+                            pct,
+                            downloaded // 1024 // 1024,
+                        )
+        logger.info("Downloaded in %.1fs (%s)", time.time() - t0, dest.name)
 
 
 # ── Engine ───────────────────────────────────────────────────────────
