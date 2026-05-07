@@ -50,7 +50,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install onnx onnxruntime huggingface_hub hf
+          pip install onnx onnxruntime onnxscript huggingface_hub hf
           pip install -r export-scripts/requirements.txt
 
       - name: Download original Fun-ASR-MLT-Nano-2512 model
@@ -61,29 +61,62 @@ jobs:
           echo "Model downloaded:"
           ls -lh Fun-ASR-MLT-Nano-2512/
 
-      - name: Export to ONNX
+      - name: Export encoder_adaptor → ONNX
         run: |
           cd export-scripts/scripts
-          # Patch run.sh with the MLT model path
-          sed -i "s|fun_asr_path=/path/to/Fun-ASR-Nano-2512|fun_asr_path=$(pwd)/../../Fun-ASR-MLT-Nano-2512|" run.sh
-          cat run.sh
-          bash run.sh
-          echo "=== Export complete ==="
+          python export_encoder_adaptor_onnx.py \
+            --model-pt ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/model.pt \
+            --output-filename ../../models/encoder_adaptor.onnx \
+            --opset-version 17 \
+            --skip-verify-int8
           ls -lh ../../models/
+
+      - name: Export embedding → ONNX
+        run: |
+          cd export-scripts/scripts
+          python export_embedding_onnx.py \
+            --model-pt ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/model.pt \
+            --llm-config-path ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/Qwen3-0.6B \
+            --output-filename ../../models/embedding.onnx \
+            --opset-version 17 \
+            --verify
+
+      - name: Export LLM → ONNX (int8)
+        run: |
+          cd export-scripts/scripts
+          python export_llm_onnx.py \
+            --model-pt ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/model.pt \
+            --llm-config-path ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/Qwen3-0.6B \
+            --output-root ../../models \
+            --opset-version 17 \
+            --seq-len 256 \
+            --past-len 256 \
+            --verify
+
+      - name: Fix ONNX compatibility
+        run: |
+          cd export-scripts/scripts
+          bash fix_all_models.sh
+          rm -rf ../../models/*.backup
+
+      - name: Verify final model files
+        run: |
+          echo "=== Model files ==="
+          find models/ -type f -name "*.onnx" -o -name "*.txt" -o -type d | sort
 
       - name: Package model
         run: |
           mkdir -p $MODEL_NAME
-          # Copy exported ONNX files (handle both int8 and fp32 variants)
-          if [ -d "export-scripts/models/llm_int8" ]; then
-            cp -r export-scripts/models/encoder_adaptor.int8.onnx $MODEL_NAME/
-            cp -r export-scripts/models/embedding.int8.onnx $MODEL_NAME/
-            cp -r export-scripts/models/llm_int8 $MODEL_NAME/
+          # Copy exported ONNX files
+          cp -r models/encoder_adaptor.int8.onnx $MODEL_NAME/
+          cp -r models/embedding.int8.onnx $MODEL_NAME/
+          if [ -d "models/llm_int8" ]; then
+            cp -r models/llm_int8 $MODEL_NAME/
           else
-            cp -r export-scripts/models/*.onnx $MODEL_NAME/
+            cp -r models/llm.onnx $MODEL_NAME/
           fi
           # Copy tokenizer
-          cp -r export-scripts/models/Qwen3-0.6B $MODEL_NAME/
+          cp -r Fun-ASR-MLT-Nano-2512/Qwen3-0.6B $MODEL_NAME/
           # Add metadata
           echo "Exported from FunAudioLLM/Fun-ASR-MLT-Nano-2512" > $MODEL_NAME/README.md
           echo "Date: $(date -u +%Y-%m-%d)" >> $MODEL_NAME/README.md

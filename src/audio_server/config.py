@@ -71,6 +71,9 @@ class Settings:
     sherpa_onnx_itn: bool = field(
         default_factory=lambda: os.getenv("SHERPA_ONNX_ITN", "true").lower() == "true"
     )
+    sherpa_onnx_provider: str = field(
+        default_factory=lambda: os.getenv("SHERPA_ONNX_PROVIDER", "cpu")
+    )
 
     @property
     def vad_mode(self) -> int:

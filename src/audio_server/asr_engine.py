@@ -103,7 +103,8 @@ class _SherpaOnnxBackend:
 
     def _init_sense_voice(self, sherpa_onnx, model_dir: Path, lang: str) -> None:
         logger.info(
-            "Loading sherpa-onnx SenseVoice (threads=%d, language=%s)...",
+            "Loading sherpa-onnx SenseVoice (provider=%s, threads=%d, language=%s)...",
+            settings.sherpa_onnx_provider,
             settings.sherpa_onnx_num_threads,
             lang or "auto",
         )
@@ -114,13 +115,15 @@ class _SherpaOnnxBackend:
             language=lang,
             use_itn=True,
             debug=False,
+            provider=settings.sherpa_onnx_provider,
         )
 
     def _init_funasr_nano(self, sherpa_onnx, model_dir: Path, lang: str) -> None:
         model_label = "FunASR" if self._model_type == "funasr_nano" else "FunASR-MLT"
         logger.info(
-            "Loading sherpa-onnx %s (threads=%d, language=%s, itn=%s)...",
+            "Loading sherpa-onnx %s (provider=%s, threads=%d, language=%s, itn=%s)...",
             model_label,
+            settings.sherpa_onnx_provider,
             settings.sherpa_onnx_num_threads,
             lang or "auto",
             settings.sherpa_onnx_itn,
@@ -142,11 +145,13 @@ class _SherpaOnnxBackend:
             language=lang,
             itn=settings.sherpa_onnx_itn,
             debug=False,
+            provider=settings.sherpa_onnx_provider,
         )
 
     def _init_qwen3_asr(self, sherpa_onnx, model_dir: Path) -> None:
         logger.info(
-            "Loading sherpa-onnx Qwen3-ASR 0.6B (threads=%d)...",
+            "Loading sherpa-onnx Qwen3-ASR 0.6B (provider=%s, threads=%d)...",
+            settings.sherpa_onnx_provider,
             settings.sherpa_onnx_num_threads,
         )
         # Qwen3-ASR uses feature_dim=128 (vs usual 80)
@@ -161,11 +166,13 @@ class _SherpaOnnxBackend:
             temperature=1e-6,
             top_p=0.8,
             debug=False,
+            provider=settings.sherpa_onnx_provider,
         )
 
     def _init_moonshine_v2(self, sherpa_onnx, model_dir: Path) -> None:
         logger.info(
-            "Loading sherpa-onnx Moonshine V2 (threads=%d)...",
+            "Loading sherpa-onnx Moonshine V2 (provider=%s, threads=%d)...",
+            settings.sherpa_onnx_provider,
             settings.sherpa_onnx_num_threads,
         )
         # Moonshine V2 models contain encoder_model.ort, decoder_model_merged.ort, tokens.txt
@@ -179,6 +186,7 @@ class _SherpaOnnxBackend:
             tokens=str(tokens),
             num_threads=settings.sherpa_onnx_num_threads,
             debug=False,
+            provider=settings.sherpa_onnx_provider,
         )
 
     # ── Transcribe ──────────────────────────────────────────────────
