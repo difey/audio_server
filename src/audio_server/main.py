@@ -2,13 +2,14 @@
 
 import logging
 import sys
+import tempfile
 from pathlib import Path
 
 import uvicorn
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from .asr_engine import ASREngine
@@ -192,6 +193,122 @@ async def text_to_speech(req: TTSRequest):
             status_code=500,
             media_type="application/json",
         )
+
+
+# ── ASR file transcription endpoint ───────────────────────────────────
+
+
+@app.post("/v1/audio/transcriptions")
+async def transcribe_file(
+    file: UploadFile = File(...),
+    response_format: str = Form("text"),
+    language: str | None = Form(None),
+):
+    """Transcribe an audio file (WAV, MP3, FLAC, OGG, etc.).
+
+    OpenAI-compatible endpoint:
+
+        curl -X POST http://localhost:8000/v1/audio/transcriptions \\
+          -F "file=@speech.wav" \\
+          -F "response_format=json"
+
+    Supported `response_format`:
+    - ``text`` — plain text (default)
+    - ``json`` — ``{"text": "...", "duration_sec": 1.2, "inference_ms": 85}``
+    """
+    if not _asr_engine.is_loaded:
+        raise HTTPException(status_code=503, detail="ASR engine not loaded")
+
+    ext = Path(file.filename or "audio.wav").suffix.lower()
+    supported = {".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma"}
+
+    if ext not in supported:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format: {ext}. Supported: {', '.join(sorted(supported))}",
+        )
+
+    # Save uploaded file to a temp location
+    try:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            content = await file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Load audio → 16kHz mono float32
+        audio = _load_audio(tmp_path)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read audio: {e}")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    text, inference_ms = _asr_engine.transcribe(audio)
+
+    duration_sec = len(audio) / 16000
+
+    if response_format == "json":
+        return {
+            "text": text,
+            "duration_sec": round(duration_sec, 2),
+            "inference_ms": round(inference_ms, 1),
+        }
+    return Response(content=text, media_type="text/plain")
+
+
+def _load_audio(path: str) -> "np.ndarray":
+    """Load any audio file to 16kHz mono float32 [-1, 1]."""
+    import numpy as np
+    import soundfile as sf
+    import io
+
+    try:
+        data, sr = sf.read(path)
+        # soundfile handles WAV/FLAC/OGG natively
+    except Exception:
+        # For MP3/other formats, use pydub (requires ffmpeg)
+        try:
+            from pydub import AudioSegment
+        except ImportError:
+            raise RuntimeError(
+                "pydub is required for MP3/other audio formats. "
+                "Install: pip install pydub  (and system ffmpeg)"
+            )
+        audio_seg = AudioSegment.from_file(path)
+        buf = io.BytesIO()
+        audio_seg.export(buf, format="wav")
+        buf.seek(0)
+        data, sr = sf.read(buf)
+
+    # Convert to mono
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+
+    # Resample to 16kHz if needed
+    if sr != 16000:
+        data = _resample(data, sr, 16000)
+
+    # Ensure float32 in [-1, 1]
+    if data.dtype != np.float32:
+        if data.dtype in (np.int16, np.int32):
+            data = data.astype(np.float32) / np.iinfo(data.dtype).max
+        else:
+            data = data.astype(np.float32)
+
+    return data
+
+
+def _resample(data: "np.ndarray", orig_sr: int, target_sr: int) -> "np.ndarray":
+    """Resample audio using simple linear interpolation (lightweight)."""
+    import numpy as np
+    import math
+
+    duration = len(data) / orig_sr
+    target_len = int(math.ceil(duration * target_sr))
+    indices = np.linspace(0, len(data) - 1, target_len)
+    # Linear interpolation via floor (nearest-neighbor is fast enough for ASR)
+    indices = np.round(indices).astype(int)
+    indices = np.clip(indices, 0, len(data) - 1)
+    return data[indices]
 
 
 # ── Static files (Vue SPA) ───────────────────────────────────────────
