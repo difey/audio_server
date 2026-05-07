@@ -118,6 +118,10 @@ class TTSRequest(BaseModel):
 async def text_to_speech(req: TTSRequest):
     """Synthesize text to speech (OpenAI-compatible endpoint).
 
+    Supported models:
+    - `matcha-icefall-zh-en` — Matcha-TTS (zh/en)
+    - `vits-piper-zh_CN-chaowen-medium` — VITS Piper Chinese (chaowen)
+
     Supported response formats:
     - `wav` — WAV file (audio/wav)
     - `pcm` — raw Int16 PCM (audio/L16)

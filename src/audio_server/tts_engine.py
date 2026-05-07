@@ -1,4 +1,4 @@
-"""TTS engine — sherpa-onnx OfflineTts with Matcha-TTS (zh-en)."""
+"""TTS engine — sherpa-onnx OfflineTts (Matcha-TTS, VITS/Piper)."""
 
 import io
 import logging
@@ -28,6 +28,7 @@ _VOCODER_URL = (
 # Known TTS models
 _TTS_MODELS = {
     "matcha-icefall-zh-en": {
+        "type": "matcha",
         "archive": "matcha-icefall-zh-en.tar.bz2",
         "acoustic_model": "model-steps-3.onnx",
         "vocoder": "vocos-16khz-univ.onnx",
@@ -36,11 +37,18 @@ _TTS_MODELS = {
         "data_dir": "espeak-ng-data",
         "rule_fsts": ["phone-zh.fst", "date-zh.fst", "number-zh.fst"],
     },
+    "vits-piper-zh_CN-chaowen-medium": {
+        "type": "vits",
+        "archive": "vits-piper-zh_CN-chaowen-medium.tar.bz2",
+        "model_file": "zh_CN-chaowen-medium.onnx",
+        "tokens": "tokens.txt",
+        "data_dir": "espeak-ng-data",
+    },
 }
 
 
 class _SherpaOnnxTtsBackend:
-    """Wrapper around sherpa-onnx OfflineTts (Matcha-TTS)."""
+    """Wrapper around sherpa-onnx OfflineTts (Matcha-TTS / VITS-Piper)."""
 
     def __init__(self):
         import sherpa_onnx
@@ -54,32 +62,56 @@ class _SherpaOnnxTtsBackend:
 
         model_info = _TTS_MODELS[model_name]
         model_dir = self._ensure_model(model_name, model_info)
-        vocoder_path = self._ensure_vocoder(model_info["vocoder"])
-
-        acoustic_model = str(model_dir / model_info["acoustic_model"])
-        lexicon = str(model_dir / model_info["lexicon"])
-        tokens = str(model_dir / model_info["tokens"])
-        data_dir = str(model_dir / model_info["data_dir"])
-
-        # Build rule_fsts string
-        rule_fst_paths = [
-            str(model_dir / fst) for fst in model_info["rule_fsts"]
-        ]
-        rule_fsts = ",".join(rule_fst_paths)
 
         provider = settings.tts_provider
         num_threads = settings.tts_num_threads
         max_num_sentences = settings.tts_max_num_sentences
 
-        logger.info(
-            "Loading TTS model '%s' (provider=%s, threads=%d)...",
-            model_name,
-            provider,
-            num_threads,
-        )
+        model_type = model_info.get("type", "matcha")
 
-        tts_config = sherpa_onnx.OfflineTtsConfig(
-            model=sherpa_onnx.OfflineTtsModelConfig(
+        if model_type == "vits":
+            # VITS / Piper models: single ONNX with built-in vocoder
+            model_path = str(model_dir / model_info["model_file"])
+            tokens = str(model_dir / model_info["tokens"])
+            data_dir = str(model_dir / model_info["data_dir"])
+
+            logger.info(
+                "Loading VITS TTS model '%s' (provider=%s, threads=%d)...",
+                model_name, provider, num_threads,
+            )
+
+            model_config = sherpa_onnx.OfflineTtsModelConfig(
+                vits=sherpa_onnx.OfflineTtsVitsModelConfig(
+                    model=model_path,
+                    tokens=tokens,
+                    data_dir=data_dir,
+                ),
+                provider=provider,
+                num_threads=num_threads,
+                debug=False,
+            )
+            rule_fsts = ""
+
+        else:
+            # Matcha-TTS models: acoustic model + separate vocoder
+            vocoder_path = self._ensure_vocoder(model_info["vocoder"])
+
+            acoustic_model = str(model_dir / model_info["acoustic_model"])
+            lexicon = str(model_dir / model_info["lexicon"])
+            tokens = str(model_dir / model_info["tokens"])
+            data_dir = str(model_dir / model_info["data_dir"])
+
+            rule_fst_paths = [
+                str(model_dir / fst) for fst in model_info["rule_fsts"]
+            ]
+            rule_fsts = ",".join(rule_fst_paths)
+
+            logger.info(
+                "Loading Matcha TTS model '%s' (provider=%s, threads=%d)...",
+                model_name, provider, num_threads,
+            )
+
+            model_config = sherpa_onnx.OfflineTtsModelConfig(
                 matcha=sherpa_onnx.OfflineTtsMatchaModelConfig(
                     acoustic_model=acoustic_model,
                     vocoder=str(vocoder_path),
@@ -90,7 +122,10 @@ class _SherpaOnnxTtsBackend:
                 provider=provider,
                 num_threads=num_threads,
                 debug=False,
-            ),
+            )
+
+        tts_config = sherpa_onnx.OfflineTtsConfig(
+            model=model_config,
             rule_fsts=rule_fsts,
             max_num_sentences=max_num_sentences,
         )
