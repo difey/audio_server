@@ -50,12 +50,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install onnx onnxruntime huggingface_hub
+          pip install onnx onnxruntime huggingface_hub hf
           pip install -r export-scripts/requirements.txt
 
       - name: Download original Fun-ASR-MLT-Nano-2512 model
         run: |
-          huggingface-cli download \
+          HF_TOKEN=${{ secrets.HF_TOKEN }} hf download \
             FunAudioLLM/Fun-ASR-MLT-Nano-2512 \
             --local-dir Fun-ASR-MLT-Nano-2512
           echo "Model downloaded:"
