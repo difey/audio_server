@@ -368,6 +368,12 @@ class _SherpaOnnxBackend:
                             pct,
                             downloaded // 1024 // 1024,
                         )
+        # Verify download completed
+        if total and downloaded != total:
+            dest.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Download incomplete: got {downloaded} bytes, expected {total}"
+            )
         logger.info("Downloaded in %.1fs (%s)", time.time() - t0, dest.name)
 
 

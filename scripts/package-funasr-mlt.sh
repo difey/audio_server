@@ -41,13 +41,13 @@ done
 
 # 2. LLM — archive the directory (or single file)
 if [ -d "${MODELS_DIR}/llm_int8" ]; then
-  (cd "${MODELS_DIR}" && zip -r -q "${OUTDIR}/llm_int8.zip" llm_int8/)
+  (cd "${MODELS_DIR}" && zip -X -r -q "${OUTDIR}/llm_int8.zip" llm_int8/)
   echo "Created ${OUTDIR}/llm_int8.zip"
 elif [ -f "${MODELS_DIR}/llm.onnx" ]; then
-  (cd "${MODELS_DIR}" && zip -r -q "${OUTDIR}/llm_int8.zip" llm.onnx)
+  (cd "${MODELS_DIR}" && zip -X -r -q "${OUTDIR}/llm_int8.zip" llm.onnx)
   echo "Created ${OUTDIR}/llm_int8.zip (from llm.onnx)"
 elif [ -f "${MODELS_DIR}/llm.int8.onnx" ]; then
-  (cd "${MODELS_DIR}" && zip -r -q "${OUTDIR}/llm_int8.zip" llm.int8.onnx)
+  (cd "${MODELS_DIR}" && zip -X -r -q "${OUTDIR}/llm_int8.zip" llm.int8.onnx)
   echo "Created ${OUTDIR}/llm_int8.zip (from llm.int8.onnx)"
 else
   echo "WARNING: no LLM model found"
@@ -56,7 +56,7 @@ fi
 # 3. Tokenizer directory
 TOK_DIR="Qwen3-0.6B"
 if [ -d "${MODELS_DIR}/${TOK_DIR}" ]; then
-  (cd "${MODELS_DIR}" && zip -r -q "${OUTDIR}/${TOK_DIR}.zip" "${TOK_DIR}/")
+  (cd "${MODELS_DIR}" && zip -X -r -q "${OUTDIR}/${TOK_DIR}.zip" "${TOK_DIR}/")
   echo "Created ${OUTDIR}/${TOK_DIR}.zip"
 else
   echo "WARNING: ${TOK_DIR} not found"
