@@ -111,7 +111,19 @@ class TTSRequest(BaseModel):
 # ── TTS endpoint ─────────────────────────────────────────────────────
 
 
-@app.post("/v1/audio/speech")
+@app.post(
+    "/v1/audio/speech",
+    responses={
+        200: {
+            "content": {
+                "audio/wav": {"schema": {"type": "string", "format": "binary"}},
+                "audio/L16": {"schema": {"type": "string", "format": "binary"}},
+                "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
+            },
+            "description": "Audio file (WAV, PCM, or MP3)",
+        },
+    },
+)
 async def text_to_speech(req: TTSRequest):
     """Synthesize text to speech (OpenAI-compatible endpoint).
 
