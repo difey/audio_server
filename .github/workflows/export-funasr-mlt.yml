@@ -55,7 +55,7 @@ jobs:
 
       - name: Download original Fun-ASR-MLT-Nano-2512 model
         run: |
-          huggingface-cli download \
+          hf download \
             FunAudioLLM/Fun-ASR-MLT-Nano-2512 \
             --local-dir Fun-ASR-MLT-Nano-2512 \
             --local-dir-use-symlinks False
