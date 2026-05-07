@@ -63,13 +63,14 @@ jobs:
 
       - name: Export encoder_adaptor → ONNX
         run: |
+          mkdir -p models
           cd export-scripts/scripts
           python export_encoder_adaptor_onnx.py \
             --model-pt ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/model.pt \
-            --output-filename ../../models/encoder_adaptor.onnx \
+            --output-filename ${{ github.workspace }}/models/encoder_adaptor.onnx \
             --opset-version 17 \
             --skip-verify-int8
-          ls -lh ../../models/
+          ls -lh ${{ github.workspace }}/models/
 
       - name: Export embedding → ONNX
         run: |
@@ -77,7 +78,7 @@ jobs:
           python export_embedding_onnx.py \
             --model-pt ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/model.pt \
             --llm-config-path ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/Qwen3-0.6B \
-            --output-filename ../../models/embedding.onnx \
+            --output-filename ${{ github.workspace }}/models/embedding.onnx \
             --opset-version 17 \
             --verify
 
@@ -87,7 +88,7 @@ jobs:
           python export_llm_onnx.py \
             --model-pt ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/model.pt \
             --llm-config-path ${{ github.workspace }}/Fun-ASR-MLT-Nano-2512/Qwen3-0.6B \
-            --output-root ../../models \
+            --output-root ${{ github.workspace }}/models \
             --opset-version 17 \
             --seq-len 256 \
             --past-len 256 \
@@ -96,8 +97,8 @@ jobs:
       - name: Fix ONNX compatibility
         run: |
           cd export-scripts/scripts
-          bash fix_all_models.sh
-          rm -rf ../../models/*.backup
+          bash fix_all_models.sh ${{ github.workspace }}/models
+          rm -rf ${{ github.workspace }}/models/*.backup
 
       - name: Verify final model files
         run: |
