@@ -83,15 +83,15 @@ class _SherpaOnnxBackend:
     # 2GB per-file limit). Each entry:
     #   (part_filename_in_release, is_archive, extract_subdir)
     #   - part_filename: basename as uploaded to GitHub Release
-    #   - is_archive: True = .tar.bz2 to extract after download
+    #   - is_archive: True = .zip/.tar.bz2 to extract after download
     #   - extract_subdir: subdirectory to extract into (None = flat)
-    # The full download URL is: {base_url}/{model_name}_{part_filename}
+    # The download URL is: {base_url}/{part_filename}
     _PARTS_MANIFEST: dict[str, list[tuple[str, bool, str | None]]] = {
         "funasr_mlt_nano": [
             ("encoder_adaptor.int8.onnx", False, None),
             ("embedding.int8.onnx", False, None),
-            ("llm_int8.tar.bz2", True, None),
-            ("Qwen3-0.6B.tar.bz2", True, None),
+            ("llm_int8.zip", True, None),
+            ("Qwen3-0.6B.zip", True, None),
         ],
     }
 
@@ -339,8 +339,13 @@ class _SherpaOnnxBackend:
                 logger.info("Extracting %s...", dest.name)
                 target = cached_dir / extract_subdir if extract_subdir else cached_dir
                 target.mkdir(parents=True, exist_ok=True)
-                with tarfile.open(dest, "r:bz2") as tar:
-                    tar.extractall(path=target)
+                if dest.suffix == ".zip":
+                    import zipfile
+                    with zipfile.ZipFile(dest) as z:
+                        z.extractall(path=target)
+                else:
+                    with tarfile.open(dest, "r:bz2") as tar:
+                        tar.extractall(path=target)
                 dest.unlink()
 
     @staticmethod

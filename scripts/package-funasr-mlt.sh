@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Package exported FunASR-MLT-Nano ONNX files into multi-part tarballs
+# Package exported FunASR-MLT-Nano ONNX files into multi-part assets
 # suitable for uploading to a GitHub Release.
 #
 # Usage:
@@ -7,15 +7,12 @@
 #   bash /path/to/asr-server/scripts/package-funasr-mlt.sh
 #
 # Output files (each < 2GB for GitHub Release limits):
-#   sherpa-onnx-funasr-mlt-nano-int8-<date>/
-#   ├── encoder_adaptor.int8.onnx          # ~40MB, direct file
-#   ├── embedding.int8.onnx                # ~160MB, direct file
-#   ├── llm_int8.tar.bz2                   # ~600MB, archive
-#   └── Qwen3-0.6B.tar.bz2                 # ~1MB, archive
+#   encoder_adaptor.int8.onnx          # ~40MB, direct file
+#   embedding.int8.onnx                # ~160MB, direct file
+#   llm_int8.zip                       # ~600MB, archived
+#   Qwen3-0.6B.zip                     # ~1MB, archived
 #
 # These are uploaded individually to GitHub Release.
-# The model name prefix is used by the downloader to reconstruct
-# the full URL: {base_url}/{model_name}_{part_name}
 
 set -euo pipefail
 
@@ -44,14 +41,14 @@ done
 
 # 2. LLM — archive the directory (or single file)
 if [ -d "${MODELS_DIR}/llm_int8" ]; then
-  tar -cjf "${OUTDIR}/llm_int8.tar.bz2" -C "${MODELS_DIR}" llm_int8/
-  echo "Created ${OUTDIR}/llm_int8.tar.bz2"
+  (cd "${MODELS_DIR}" && zip -r -q "${OUTDIR}/llm_int8.zip" llm_int8/)
+  echo "Created ${OUTDIR}/llm_int8.zip"
 elif [ -f "${MODELS_DIR}/llm.onnx" ]; then
-  tar -cjf "${OUTDIR}/llm_int8.tar.bz2" -C "${MODELS_DIR}" llm.onnx
-  echo "Created ${OUTDIR}/llm_int8.tar.bz2 (from llm.onnx)"
+  (cd "${MODELS_DIR}" && zip -r -q "${OUTDIR}/llm_int8.zip" llm.onnx)
+  echo "Created ${OUTDIR}/llm_int8.zip (from llm.onnx)"
 elif [ -f "${MODELS_DIR}/llm.int8.onnx" ]; then
-  tar -cjf "${OUTDIR}/llm_int8.tar.bz2" -C "${MODELS_DIR}" llm.int8.onnx
-  echo "Created ${OUTDIR}/llm_int8.tar.bz2 (from llm.int8.onnx)"
+  (cd "${MODELS_DIR}" && zip -r -q "${OUTDIR}/llm_int8.zip" llm.int8.onnx)
+  echo "Created ${OUTDIR}/llm_int8.zip (from llm.int8.onnx)"
 else
   echo "WARNING: no LLM model found"
 fi
@@ -59,8 +56,8 @@ fi
 # 3. Tokenizer directory
 TOK_DIR="Qwen3-0.6B"
 if [ -d "${MODELS_DIR}/${TOK_DIR}" ]; then
-  tar -cjf "${OUTDIR}/${TOK_DIR}.tar.bz2" -C "${MODELS_DIR}" "${TOK_DIR}/"
-  echo "Created ${OUTDIR}/${TOK_DIR}.tar.bz2"
+  (cd "${MODELS_DIR}" && zip -r -q "${OUTDIR}/${TOK_DIR}.zip" "${TOK_DIR}/")
+  echo "Created ${OUTDIR}/${TOK_DIR}.zip"
 else
   echo "WARNING: ${TOK_DIR} not found"
 fi
@@ -87,6 +84,6 @@ done
 
 echo ""
 echo "=== Upload commands ==="
-echo "gh release upload asr-models ${OUTDIR}/*"
+echo "gh release upload asr_models ${OUTDIR}/*"
 echo ""
 echo "=== Done ==="

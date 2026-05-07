@@ -84,10 +84,6 @@ app = FastAPI(title="Audio Server", version="0.1.0", lifespan=lifespan)
 class TTSRequest(BaseModel):
     """Request body for POST /v1/audio/speech."""
 
-    model: str = Field(
-        default=settings.tts_model,
-        description="TTS model name",
-    )
     input: str = Field(
         ...,
         description="Text to synthesize",
