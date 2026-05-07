@@ -42,7 +42,8 @@ _TTS_MODELS = {
         "archive": "vits-piper-zh_CN-chaowen-medium.tar.bz2",
         "model_file": "zh_CN-chaowen-medium.onnx",
         "tokens": "tokens.txt",
-        "data_dir": "espeak-ng-data",
+        "lexicon": "lexicon.txt",
+        "rule_fsts": ["phone.fst", "date.fst", "number.fst"],
     },
 }
 
@@ -73,7 +74,28 @@ class _SherpaOnnxTtsBackend:
             # VITS / Piper models: single ONNX with built-in vocoder
             model_path = str(model_dir / model_info["model_file"])
             tokens = str(model_dir / model_info["tokens"])
-            data_dir = str(model_dir / model_info["data_dir"])
+
+            # Some VITS models use espeak-ng-data, others use lexicon + rule_fsts
+            vits_config_kwargs = {
+                "model": model_path,
+                "tokens": tokens,
+            }
+            if "data_dir" in model_info:
+                vits_config_kwargs["data_dir"] = str(
+                    model_dir / model_info["data_dir"]
+                )
+            if "lexicon" in model_info:
+                vits_config_kwargs["lexicon"] = str(
+                    model_dir / model_info["lexicon"]
+                )
+
+            if "rule_fsts" in model_info:
+                rule_fst_paths = [
+                    str(model_dir / fst) for fst in model_info["rule_fsts"]
+                ]
+                rule_fsts = ",".join(rule_fst_paths)
+            else:
+                rule_fsts = ""
 
             logger.info(
                 "Loading VITS TTS model '%s' (provider=%s, threads=%d)...",
@@ -82,15 +104,12 @@ class _SherpaOnnxTtsBackend:
 
             model_config = sherpa_onnx.OfflineTtsModelConfig(
                 vits=sherpa_onnx.OfflineTtsVitsModelConfig(
-                    model=model_path,
-                    tokens=tokens,
-                    data_dir=data_dir,
+                    **vits_config_kwargs,
                 ),
                 provider=provider,
                 num_threads=num_threads,
                 debug=False,
             )
-            rule_fsts = ""
 
         else:
             # Matcha-TTS models: acoustic model + separate vocoder
