@@ -93,6 +93,25 @@ class Settings:
         """Number of consecutive silence frames to end a speech segment."""
         return max(1, self.silence_duration_ms // self.vad_frame_ms)
 
+    # ── Qwen3-TTS (qwen-tts package) ──
+    tts_qwen3_model: str = field(
+        default_factory=lambda: os.getenv(
+            "TTS_QWEN3_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+        )
+    )
+    tts_qwen3_device: str = field(
+        default_factory=lambda: os.getenv("TTS_QWEN3_DEVICE", "cuda:0")
+    )
+    tts_qwen3_dtype: str = field(
+        default_factory=lambda: os.getenv("TTS_QWEN3_DTYPE", "bfloat16")
+    )
+    tts_qwen3_speaker: str = field(
+        default_factory=lambda: os.getenv("TTS_QWEN3_SPEAKER", "Vivian")
+    )
+    tts_qwen3_language: str = field(
+        default_factory=lambda: os.getenv("TTS_QWEN3_LANGUAGE", "auto")
+    )
+
     # ── TTS (Text-to-Speech) ──
     tts_enabled: bool = field(
         default_factory=lambda: os.getenv("TTS_ENABLED", "false").lower() == "true"

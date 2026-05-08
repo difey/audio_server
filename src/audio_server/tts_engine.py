@@ -1,4 +1,4 @@
-"""TTS engine — sherpa-onnx OfflineTts (Matcha-TTS, VITS/Piper)."""
+"""TTS engine — sherpa-onnx OfflineTts (Matcha-TTS, VITS/Piper) / Qwen3-TTS."""
 
 import io
 import logging
@@ -17,6 +17,11 @@ import soundfile as sf
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _is_qwen3_tts_model(model_name: str) -> bool:
+    """Check if model name refers to a Qwen3-TTS HuggingFace model."""
+    return model_name.startswith("Qwen/Qwen3-TTS-12Hz")
 
 _TTS_MODEL_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
@@ -345,8 +350,151 @@ class _SherpaOnnxTtsBackend:
         return vocoder_path
 
 
+# ── Qwen3-TTS Backend (qwen-tts package) ──────────────────────────────
+
+
+class _Qwen3TtsBackend:
+    """Wrapper around Qwen3-TTS from the ``qwen-tts`` package.
+
+    Supports both 0.6B and 1.7B CustomVoice models:
+      - Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+      - Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+    """
+
+    def __init__(self):
+        model_id = settings.tts_qwen3_model
+        device = settings.tts_qwen3_device
+        dtype_str = settings.tts_qwen3_dtype
+
+        import torch
+
+        dtype_map = {
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+            "float32": torch.float32,
+        }
+        dtype = dtype_map.get(dtype_str, torch.bfloat16)
+
+        logger.info(
+            "Loading Qwen3-TTS model '%s' (device=%s, dtype=%s)...",
+            model_id, device, dtype_str,
+        )
+        t0 = time.monotonic()
+
+        from qwen_tts import Qwen3TTSModel
+
+        self._model = Qwen3TTSModel.from_pretrained(
+            model_id,
+            device_map=device,
+            dtype=dtype,
+        )
+
+        # Detect whether this model supports ``instruct``
+        # (1.7B CustomVoice supports it, 0.6B does not).
+        self._supports_instruct = "1.7B" in model_id and "CustomVoice" in model_id
+
+        self._sample_rate = getattr(self._model, "sample_rate", 24000)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            "Qwen3-TTS model loaded in %.1fs (sample_rate=%d, instruct=%s)",
+            elapsed, self._sample_rate, self._supports_instruct,
+        )
+
+    def synthesize(
+        self,
+        text: str,
+        language: Optional[str] = None,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
+    ) -> tuple[np.ndarray, int]:
+        """Synthesize text using Qwen3-TTS CustomVoice.
+
+        Args:
+            text: Input text to synthesize.
+            language: Language (e.g. ``"Chinese"``, ``"English"``, ``"Auto"``).
+                      Defaults to ``TTS_QWEN3_LANGUAGE``.
+            speaker: Speaker name (e.g. ``"Vivian"``, ``"Ryan"``).
+                     Defaults to ``TTS_QWEN3_SPEAKER``.
+            instruct: Natural-language instruction (1.7B only; ignored for 0.6B).
+
+        Returns:
+            Tuple of (float32 samples, sample_rate).
+        """
+        if not text.strip():
+            raise ValueError("Input text is empty")
+
+        language = language or settings.tts_qwen3_language
+        speaker = speaker or settings.tts_qwen3_speaker
+
+        kwargs: dict = {
+            "text": text,
+            "language": language,
+            "speaker": speaker,
+        }
+        # Only pass ``instruct`` if the model supports it
+        if self._supports_instruct and instruct:
+            kwargs["instruct"] = instruct
+
+        t0 = time.monotonic()
+        wavs, sr = self._model.generate_custom_voice(**kwargs)
+        elapsed = time.monotonic() - t0
+
+        if not wavs or len(wavs[0]) == 0:
+            raise RuntimeError("Qwen3-TTS generated empty audio")
+
+        samples = np.asarray(wavs[0], dtype=np.float32)
+        audio_duration = len(samples) / sr if sr > 0 else 0
+        rtf = elapsed / audio_duration if audio_duration > 0 else 0
+        logger.info(
+            "Qwen3-TTS: %.1fs audio generated in %.2fs (RTF=%.2f, text='%s')",
+            audio_duration, elapsed, rtf, text[:50],
+        )
+
+        return samples, sr
+
+    # ── Output format helpers (reuse generic logic) ────────────────────
+
+    def _to_wav_bytes(self, samples: np.ndarray, sr: int) -> bytes:
+        buf = io.BytesIO()
+        sf.write(buf, samples, samplerate=sr, format="WAV")
+        buf.seek(0)
+        return buf.read()
+
+    def _to_pcm_bytes(self, samples: np.ndarray, sr: int) -> tuple[bytes, int]:
+        int16_data = (samples * 32767).clip(-32768, 32767).astype(np.int16)
+        return int16_data.tobytes(), sr
+
+    def _to_mp3_bytes(self, samples: np.ndarray, sr: int) -> bytes:
+        wav_buf = io.BytesIO()
+        sf.write(wav_buf, samples, samplerate=sr, format="WAV")
+        wav_buf.seek(0)
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f", "wav",
+                "-i", "pipe:0",
+                "-f", "mp3",
+                "-b:a", "128k",
+                "-bitexact",
+                "pipe:1",
+            ],
+            input=wav_buf.read(),
+            capture_output=True,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg MP3 encoding failed: {proc.stderr.decode(errors='replace')}"
+            )
+        return proc.stdout
+
+
+# ── Unified Singleton Wrapper ─────────────────────────────────────────
+
+
 class TTSEngine:
-    """Singleton wrapper around the sherpa-onnx TTS backend."""
+    """Singleton wrapper that auto-selects sherpa-onnx or Qwen3-TTS backend."""
 
     _instance: Optional["TTSEngine"] = None
 
@@ -359,14 +507,21 @@ class TTSEngine:
         if hasattr(self, "_initialized") and self._initialized:
             return
         self._backend: Optional[_SherpaOnnxTtsBackend] = None
+        self._qwen3_backend: Optional[_Qwen3TtsBackend] = None
         self._initialized = False
 
     def load(self) -> None:
-        """Load the TTS model. Called once at startup if TTS is enabled."""
-        if self._backend is not None:
+        """Load the appropriate TTS backend based on ``settings.tts_model``."""
+        if self._backend is not None or self._qwen3_backend is not None:
             return
-        self._backend = _SherpaOnnxTtsBackend()
+
+        if _is_qwen3_tts_model(settings.tts_model):
+            self._qwen3_backend = _Qwen3TtsBackend()
+        else:
+            self._backend = _SherpaOnnxTtsBackend()
         self._initialized = True
+
+    # ── Sherpa-onnx interface (original) ───────────────────────────────
 
     def synthesize(
         self,
@@ -374,7 +529,7 @@ class TTSEngine:
         sid: Optional[int] = None,
         speed: Optional[float] = None,
     ) -> tuple[np.ndarray, int]:
-        """Synthesize text to audio.
+        """Synthesize text to audio (sherpa-onnx backend).
 
         Args:
             text: Input text.
@@ -385,7 +540,9 @@ class TTSEngine:
             Tuple of (float32 samples, sample_rate).
         """
         if self._backend is None:
-            raise RuntimeError("TTS engine not loaded. Call load() first.")
+            raise RuntimeError(
+                "Sherpa-onnx TTS not loaded. Use a qwen3 model name or check config."
+            )
         return self._backend.synthesize(text, sid=sid, speed=speed)
 
     def synthesize_to_wav_bytes(
@@ -394,9 +551,9 @@ class TTSEngine:
         sid: Optional[int] = None,
         speed: Optional[float] = None,
     ) -> bytes:
-        """Synthesize text and return WAV bytes."""
+        """Synthesize text and return WAV bytes (sherpa-onnx)."""
         if self._backend is None:
-            raise RuntimeError("TTS engine not loaded. Call load() first.")
+            raise RuntimeError("Sherpa-onnx TTS not loaded.")
         return self._backend.synthesize_to_wav_bytes(text, sid=sid, speed=speed)
 
     def synthesize_to_pcm_bytes(
@@ -405,9 +562,9 @@ class TTSEngine:
         sid: Optional[int] = None,
         speed: Optional[float] = None,
     ) -> tuple[bytes, int]:
-        """Synthesize text and return raw Int16 PCM bytes + sample rate."""
+        """Synthesize text and return raw Int16 PCM bytes (sherpa-onnx)."""
         if self._backend is None:
-            raise RuntimeError("TTS engine not loaded. Call load() first.")
+            raise RuntimeError("Sherpa-onnx TTS not loaded.")
         return self._backend.synthesize_to_pcm_bytes(text, sid=sid, speed=speed)
 
     def synthesize_to_mp3_bytes(
@@ -416,17 +573,93 @@ class TTSEngine:
         sid: Optional[int] = None,
         speed: Optional[float] = None,
     ) -> bytes:
-        """Synthesize text and return MP3 bytes."""
+        """Synthesize text and return MP3 bytes (sherpa-onnx)."""
         if self._backend is None:
-            raise RuntimeError("TTS engine not loaded. Call load() first.")
+            raise RuntimeError("Sherpa-onnx TTS not loaded.")
         return self._backend.synthesize_to_mp3_bytes(text, sid=sid, speed=speed)
+
+    # ── Qwen3-TTS interface (new) ──────────────────────────────────────
+
+    def synthesize_qwen3(
+        self,
+        text: str,
+        language: Optional[str] = None,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
+    ) -> tuple[np.ndarray, int]:
+        """Synthesize text using Qwen3-TTS CustomVoice.
+
+        Args:
+            text: Input text.
+            language: Language (e.g. ``"Chinese"``, ``"English"``).
+            speaker: Speaker name (e.g. ``"Vivian"``, ``"Ryan"``).
+            instruct: Optional instruction (1.7B only).
+
+        Returns:
+            Tuple of (float32 samples, sample_rate).
+        """
+        if self._qwen3_backend is None:
+            raise RuntimeError(
+                "Qwen3-TTS not loaded. Use a sherpa-onnx model name or set TTS_MODEL"
+                " to a Qwen3-TTS model ID."
+            )
+        return self._qwen3_backend.synthesize(
+            text, language=language, speaker=speaker, instruct=instruct,
+        )
+
+    def synthesize_qwen3_to_wav_bytes(
+        self,
+        text: str,
+        language: Optional[str] = None,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
+    ) -> bytes:
+        """Synthesize text and return WAV bytes (Qwen3-TTS)."""
+        samples, sr = self.synthesize_qwen3(
+            text, language=language, speaker=speaker, instruct=instruct,
+        )
+        return self._qwen3_backend._to_wav_bytes(samples, sr)
+
+    def synthesize_qwen3_to_pcm_bytes(
+        self,
+        text: str,
+        language: Optional[str] = None,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
+    ) -> tuple[bytes, int]:
+        """Synthesize text and return raw Int16 PCM bytes (Qwen3-TTS)."""
+        samples, sr = self.synthesize_qwen3(
+            text, language=language, speaker=speaker, instruct=instruct,
+        )
+        return self._qwen3_backend._to_pcm_bytes(samples, sr)
+
+    def synthesize_qwen3_to_mp3_bytes(
+        self,
+        text: str,
+        language: Optional[str] = None,
+        speaker: Optional[str] = None,
+        instruct: Optional[str] = None,
+    ) -> bytes:
+        """Synthesize text and return MP3 bytes (Qwen3-TTS)."""
+        samples, sr = self.synthesize_qwen3(
+            text, language=language, speaker=speaker, instruct=instruct,
+        )
+        return self._qwen3_backend._to_mp3_bytes(samples, sr)
+
+    # ── Properties ─────────────────────────────────────────────────────
 
     @property
     def is_loaded(self) -> bool:
-        return self._backend is not None
+        return self._backend is not None or self._qwen3_backend is not None
+
+    @property
+    def is_qwen3(self) -> bool:
+        return self._qwen3_backend is not None
 
     @property
     def sample_rate(self) -> int:
-        if self._backend is None:
-            return 0
-        return self._backend.sample_rate
+        if self._qwen3_backend is not None:
+            return self._qwen3_backend._sample_rate
+        if self._backend is not None:
+            return self._backend.sample_rate
+        return 0

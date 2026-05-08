@@ -96,10 +96,15 @@ cp .env.example .env
 | | `SHERPA_ONNX_ITN` | `true` | 逆文本正则化 |
 | **ASR VAD** | `VAD_MODE` | `0` | 灵敏度 0-3（0=最不敏感）|
 | | `SILENCE_DURATION_MS` | `600` | 静音判定时长 (ms) |
-| **TTS** | `TTS_MODEL` | `matcha-icefall-zh-en` | 模型名称，首次自动下载 |
+| **TTS (sherpa-onnx)** | `TTS_MODEL` | `matcha-icefall-zh-en` | 模型名称，首次自动下载 |
 | | `TTS_PROVIDER` | `cpu` | 推理后端 (`cpu` / `cuda`) |
 | | `TTS_NUM_THREADS` | `4` | 推理线程数 |
 | | `TTS_SPEED` | `1.0` | 语速 (0.5-2.0) |
+| **TTS (Qwen3-TTS)** | `TTS_MODEL` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | HF 模型 ID（以 `Qwen/Qwen3-TTS-` 开头自动启用 Qwen3 后端）|
+| | `TTS_QWEN3_DEVICE` | `cuda:0` | 推理设备 |
+| | `TTS_QWEN3_DTYPE` | `bfloat16` | 数据类型 (`float16` / `bfloat16` / `float32`) |
+| | `TTS_QWEN3_SPEAKER` | `Vivian` | 默认发音人 |
+| | `TTS_QWEN3_LANGUAGE` | `auto` | 默认语种 (如 `Chinese` / `English` / `Auto`) |
 | **服务器** | `HOST` | `0.0.0.0` | 监听地址 |
 | | `PORT` | `8000` | 监听端口 |
 | | `MAX_CONNECTIONS` | `4` | 最大并发连接数 |
@@ -108,17 +113,34 @@ cp .env.example .env
 
 ## TTS (Text-to-Speech)
 
-通过 HTTP 同步接口合成语音。兼容 OpenAI TTS API 格式。
+支持两种后端：**sherpa-onnx**（轻量，`matcha-icefall-zh-en` 等）和 **Qwen3-TTS**（高质量多语言，0.6B/1.7B）。
 
-### 启用
+通过 `TTS_MODEL` 环境变量自动选择后端：
+- 以 `Qwen/Qwen3-TTS-12Hz-` 开头 → Qwen3-TTS 后端
+- 其他值（如 `matcha-icefall-zh-en`）→ sherpa-onnx 后端
+
+### 启用 sherpa-onnx
 
 ```bash
-# 设置环境变量
 export TTS_ENABLED=true
 export TTS_PROVIDER=cpu   # x86 CUDA: export TTS_PROVIDER=cuda
 ```
 
+### 启用 Qwen3-TTS（0.6B / 1.7B CustomVoice）
+
+```bash
+export TTS_ENABLED=true
+export TTS_MODEL="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+export TTS_QWEN3_DEVICE="cuda:0"
+export TTS_QWEN3_DTYPE="bfloat16"
+
+# 可选依赖
+pip install qwen-tts torch transformers
+```
+
 ### 接口
+
+#### Sherpa-onnx 请求
 
 ```
 POST /v1/audio/speech
@@ -133,32 +155,91 @@ Content-Type: application/json
 }
 ```
 
-成功返回 `audio/wav` 二进制音频。
+#### Qwen3-TTS 请求
+
+```
+POST /v1/audio/speech
+Content-Type: application/json
+
+{
+  "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+  "input": "其实我真的有发现，我是一个特别善于观察别人情绪的人。",
+  "voice": "Vivian",
+  "language": "Chinese",
+  "response_format": "wav"
+}
+```
+
+支持 9 种预置发音人：
+
+| 发音人 | 描述 | 母语 |
+|--------|------|------|
+| Vivian | 明亮略带锋芒的年轻女声 | 中文 |
+| Serena | 温婉轻柔的年轻女声 | 中文 |
+| Uncle_Fu | 低沉圆润的成熟男声 | 中文 |
+| Dylan | 京腔青年男声，清澈自然 | 中文 (北京) |
+| Eric | 活泼的成都男声 | 中文 (四川) |
+| Ryan | 律动感强的男声 | 英文 |
+| Aiden | 阳光美式男声 | 英文 |
+| Ono_Anna | 俏皮的日系女声 | 日文 |
+| Sohee | 温暖的韩系女声 | 韩文 |
+
+> 0.6B 模型不支持 `instruct` 参数。1.7B 模型支持通过 `instruct` 字段控制语气、情感：
+> ```json
+> { "instruct": "用特别愤怒的语气说" }
+> ```
 
 ### curl 测试
 
 ```bash
+# sherpa-onnx
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{"input": "你好，世界！"}' \
+  --output speech.wav
+
+# Qwen3-TTS 0.6B
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"input": "你好，世界！", "voice": "Vivian", "language": "Chinese"}' \
   --output speech.wav
 ```
 
 ### 中英混合
 
 ```bash
+# sherpa-onnx
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{"input": "我最近在学习machine learning，希望能有所建树。"}' \
   --output speech.wav
 ```
 
+### 性能测试 (RTF)
+
+```bash
+# 安装依赖
+pip install qwen-tts torch numpy
+
+# 0.6B 模型 RTF 测试
+uv run python scripts/benchmark_rtf.py
+
+# 1.7B 模型 RTF 测试
+uv run python scripts/benchmark_rtf.py \
+  --model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+
+# CPU 测试
+uv run python scripts/benchmark_rtf.py --device cpu --dtype float32
+```
+
 ### 注意事项
 
-- `matcha-icefall-zh-en` 输出 **16kHz 单声道** WAV
-- `voice` 参数对应 `sid`（说话人 ID），当前模型仅支持 `0`
-- `speed` 范围 0.5-2.0
-- 首次使用自动下载模型到 `~/.cache/audio-server/sherpa-onnx/`
+- sherpa-onnx: `matcha-icefall-zh-en` 输出 **16kHz 单声道** WAV
+- Qwen3-TTS: 输出 **24kHz 单声道** WAV
+- Qwen3-TTS: 首次运行自动从 HuggingFace 下载模型（~600MB for 0.6B, ~3GB for 1.7B）
+- Qwen3-TTS: 需要 GPU（至少 4GB VRAM for 0.6B, 8GB for 1.7B）
+- `voice` 参数：sherpa-onnx 用数字 ID，Qwen3-TTS 用发音人名称
+- `speed` 参数仅对 sherpa-onnx 生效
 
 ---
 
@@ -231,7 +312,7 @@ audio-server/
 │   ├── vad.py                      # 语音活动检测 (webrtcvad)
 │   ├── audio_buffer.py             # 环形音频缓冲区
 │   ├── session.py                  # WebSocket 会话管理 + VAD 状态机
-│   ├── tts_engine.py               # TTS 引擎 (sherpa-onnx)
+│   ├── tts_engine.py               # TTS 引擎 (sherpa-onnx / Qwen3-TTS)
 │   └── static/                     # 构建好的前端文件 (可选)
 ├── frontend/                       # Vue 3 前端源码 (可选)
 │   ├── src/components/
@@ -240,7 +321,8 @@ audio-server/
 │   └── public/audio-processor.js   # AudioWorkletProcessor
 └── scripts/
     ├── test_client.py              # Python 命令行测试客户端
-    └── fix_vad.py                  # webrtcvad 兼容性修复
+    ├── fix_vad.py                  # webrtcvad 兼容性修复
+    └── benchmark_rtf.py            # Qwen3-TTS RTF 性能测试
 ```
 
 ---

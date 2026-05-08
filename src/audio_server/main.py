@@ -93,7 +93,7 @@ class TTSRequest(BaseModel):
     )
     voice: str | None = Field(
         default=None,
-        description="Speaker ID (e.g. '0', '1')",
+        description="Speaker ID (e.g. '0', '1') for sherpa-onnx, or speaker name (e.g. 'Vivian') for Qwen3-TTS",
     )
     response_format: str = Field(
         default="wav",
@@ -104,7 +104,16 @@ class TTSRequest(BaseModel):
         default=1.0,
         ge=0.5,
         le=2.0,
-        description="Speed factor (0.5-2.0)",
+        description="Speed factor (0.5-2.0, sherpa-onnx only)",
+    )
+    # ── Qwen3-TTS specific ──
+    language: str | None = Field(
+        default=None,
+        description="Language for Qwen3-TTS (e.g. 'Chinese', 'English', 'Auto')",
+    )
+    instruct: str | None = Field(
+        default=None,
+        description="Natural-language instruction for voice control (1.7B model only)",
     )
 
 
@@ -127,17 +136,25 @@ class TTSRequest(BaseModel):
 async def text_to_speech(req: TTSRequest):
     """Synthesize text to speech (OpenAI-compatible endpoint).
 
-    Supported models:
+    Supports both sherpa-onnx models and Qwen3-TTS models.
+
+    Sherpa-onnx models:
     - `matcha-icefall-zh-en` — Matcha-TTS (zh/en)
     - `vits-piper-zh_CN-chaowen-medium` — VITS Piper Chinese (chaowen)
     - `vits-piper-en_GB-jenny_dioco-medium` — VITS Piper English UK (jenny_dioco)
+
+    Qwen3-TTS models (set ``TTS_MODEL`` to model ID like
+    ``Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice``):
+    - ``voice`` → speaker name (e.g. ``"Vivian"``, ``"Ryan"``)
+    - ``language`` → language (e.g. ``"Chinese"``, ``"English"``)
+    - ``instruct`` → optional instruction (1.7B only)
 
     Supported response formats:
     - `wav` — WAV file (audio/wav)
     - `pcm` — raw Int16 PCM (audio/L16)
     - `mp3` — MP3 via ffmpeg (audio/mpeg)
 
-    Request:
+    Request (sherpa-onnx):
         ```json
         {
           "model": "matcha-icefall-zh-en",
@@ -145,6 +162,17 @@ async def text_to_speech(req: TTSRequest):
           "voice": "0",
           "response_format": "wav",
           "speed": 1.0
+        }
+        ```
+
+    Request (Qwen3-TTS):
+        ```json
+        {
+          "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+          "input": "你好，世界！",
+          "voice": "Vivian",
+          "language": "Chinese",
+          "response_format": "wav"
         }
         ```
 
@@ -158,38 +186,72 @@ async def text_to_speech(req: TTSRequest):
             media_type="application/json",
         )
 
-    sid = int(req.voice) if req.voice is not None else None
-
     try:
         fmt = req.response_format
 
-        if fmt == "wav":
-            audio_bytes = _tts_engine.synthesize_to_wav_bytes(
-                text=req.input, sid=sid, speed=req.speed,
-            )
-            media_type = "audio/wav"
-            filename = "speech.wav"
-
-        elif fmt == "pcm":
-            audio_bytes, sample_rate = _tts_engine.synthesize_to_pcm_bytes(
-                text=req.input, sid=sid, speed=req.speed,
-            )
-            media_type = f"audio/L16; rate={sample_rate}; channels=1"
-            filename = "speech.pcm"
-
-        elif fmt == "mp3":
-            audio_bytes = _tts_engine.synthesize_to_mp3_bytes(
-                text=req.input, sid=sid, speed=req.speed,
-            )
-            media_type = "audio/mpeg"
-            filename = "speech.mp3"
-
+        if _tts_engine.is_qwen3:
+            # ── Qwen3-TTS path ──────────────────────────────────────────
+            if fmt == "wav":
+                audio_bytes = _tts_engine.synthesize_qwen3_to_wav_bytes(
+                    text=req.input,
+                    language=req.language,
+                    speaker=req.voice,
+                    instruct=req.instruct,
+                )
+                media_type = "audio/wav"
+                filename = "speech.wav"
+            elif fmt == "pcm":
+                audio_bytes, sample_rate = _tts_engine.synthesize_qwen3_to_pcm_bytes(
+                    text=req.input,
+                    language=req.language,
+                    speaker=req.voice,
+                    instruct=req.instruct,
+                )
+                media_type = f"audio/L16; rate={sample_rate}; channels=1"
+                filename = "speech.pcm"
+            elif fmt == "mp3":
+                audio_bytes = _tts_engine.synthesize_qwen3_to_mp3_bytes(
+                    text=req.input,
+                    language=req.language,
+                    speaker=req.voice,
+                    instruct=req.instruct,
+                )
+                media_type = "audio/mpeg"
+                filename = "speech.mp3"
+            else:
+                return Response(
+                    content=f'{{"error": "Unsupported response_format: {fmt}"}}',
+                    status_code=400,
+                    media_type="application/json",
+                )
         else:
-            return Response(
-                content=f'{{"error": "Unsupported response_format: {fmt}"}}',
-                status_code=400,
-                media_type="application/json",
-            )
+            # ── Sherpa-onnx path ────────────────────────────────────────
+            sid = int(req.voice) if req.voice is not None else None
+
+            if fmt == "wav":
+                audio_bytes = _tts_engine.synthesize_to_wav_bytes(
+                    text=req.input, sid=sid, speed=req.speed,
+                )
+                media_type = "audio/wav"
+                filename = "speech.wav"
+            elif fmt == "pcm":
+                audio_bytes, sample_rate = _tts_engine.synthesize_to_pcm_bytes(
+                    text=req.input, sid=sid, speed=req.speed,
+                )
+                media_type = f"audio/L16; rate={sample_rate}; channels=1"
+                filename = "speech.pcm"
+            elif fmt == "mp3":
+                audio_bytes = _tts_engine.synthesize_to_mp3_bytes(
+                    text=req.input, sid=sid, speed=req.speed,
+                )
+                media_type = "audio/mpeg"
+                filename = "speech.mp3"
+            else:
+                return Response(
+                    content=f'{{"error": "Unsupported response_format: {fmt}"}}',
+                    status_code=400,
+                    media_type="application/json",
+                )
 
         return Response(
             content=audio_bytes,
