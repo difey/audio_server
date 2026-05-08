@@ -32,7 +32,6 @@ audio = [
 qwen-tts = [
     "qwen-tts>=0.1.0",
     "transformers>=4.40.0",
-    "flash-attn>=2.0.0",
 ]
 
 [tool.uv]

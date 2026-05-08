@@ -1,22 +1,5 @@
 # Audio Server
 
-流式 ASR / TTS 服务，面向嵌入式语音助手场景，支持 sherpa-onnx 引擎。
-
-> 🎯 目标硬件：4核 A72，4GB RAM，ARM64 开发板
-
-## 架构
-
-```
-🎤 麦克风 (浏览器/设备)
-   → AudioWorklet / raw PCM
-   → WebSocket Binary (Int16, 16kHz, 30ms/帧)
-   → FastAPI 服务端
-     → webrtcvad 语音检测
-     → ASR 引擎 (sherpa-onnx)
-     → 每 400ms 发 interim 中间结果
-   → WebSocket JSON ← 转写结果 + 延迟指标
-```
-
 ## 快速开始
 
 ### 前置要求
@@ -151,7 +134,7 @@ uv sync --extra qwen-tts
 # 3. 安装 FlashAttention 2（可选但推荐，需 CUDA）
 #    注意: --no-build-isolation 是必需的，因为 flash-attn 需要在已安装
 #           PyTorch 的环境中编译
-uv run pip install -U flash-attn --no-build-isolation
+uv pip install -U flash-attn --no-build-isolation
 
 # 4. 验证安装
 uv run python -c "
@@ -163,7 +146,7 @@ print('✅ qwen-tts 安装成功')
 > 💡 **提示**: 如果系统内存 < 96GB 或 CPU 核数较多，flash-attn 编译可能 OOM，
 > 可以限制并行编译线程数：
 > ```bash
-> MAX_JOBS=4 uv run pip install -U flash-attn --no-build-isolation
+> MAX_JOBS=4 uv pip install -U flash-attn --no-build-isolation
 > ```
 
 #### 配置与启动
