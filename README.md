@@ -126,7 +126,47 @@ export TTS_ENABLED=true
 export TTS_PROVIDER=cpu   # x86 CUDA: export TTS_PROVIDER=cuda
 ```
 
-### 启用 Qwen3-TTS（0.6B / 1.7B CustomVoice）
+### Qwen3-TTS 安装指南
+
+Qwen3-TTS 依赖 `qwen-tts` 包和 PyTorch。推荐使用独立的 conda 环境安装。
+
+#### 环境要求
+
+| 组件 | 要求 |
+|------|------|
+| GPU | 0.6B: ≥4GB VRAM, 1.7B: ≥8GB VRAM |
+| CUDA | ≥ 11.8（配合 GPU 使用） |
+| Python | ≥ 3.10 |
+
+#### 完整安装步骤
+
+```bash
+# 1. 安装基础依赖（sherpa-onnx 等）
+cd /path/to/audio-server
+uv sync
+
+# 2. 安装 Qwen3-TTS 可选依赖
+uv sync --extra qwen-tts
+
+# 3. 安装 FlashAttention 2（可选但推荐，需 CUDA）
+#    注意: --no-build-isolation 是必需的，因为 flash-attn 需要在已安装
+#           PyTorch 的环境中编译
+uv run pip install -U flash-attn --no-build-isolation
+
+# 4. 验证安装
+uv run python -c "
+from qwen_tts import Qwen3TTSModel
+print('✅ qwen-tts 安装成功')
+"
+```
+
+> 💡 **提示**: 如果系统内存 < 96GB 或 CPU 核数较多，flash-attn 编译可能 OOM，
+> 可以限制并行编译线程数：
+> ```bash
+> MAX_JOBS=4 uv run pip install -U flash-attn --no-build-isolation
+> ```
+
+#### 配置与启动
 
 ```bash
 export TTS_ENABLED=true
@@ -134,8 +174,25 @@ export TTS_MODEL="Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 export TTS_QWEN3_DEVICE="cuda:0"
 export TTS_QWEN3_DTYPE="bfloat16"
 
-# 可选依赖
-pip install qwen-tts torch transformers
+# 启动服务（首次运行自动从 HuggingFace 下载模型）
+uv run python -m audio_server.main
+```
+
+#### 模型下载说明
+
+首次启动自动从 HuggingFace 下载模型到 HuggingFace 缓存目录
+（`~/.cache/huggingface/hub/`）。也可手动下载：
+
+```bash
+# 方式1: HuggingFace CLI
+pip install -U "huggingface_hub[cli]"
+huggingface-cli download Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --local-dir ./Qwen3-TTS-12Hz-0.6B-CustomVoice
+
+# 方式2: ModelScope（中国大陆用户推荐）
+pip install -U modelscope
+modelscope download --model Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --local_dir ./Qwen3-TTS-12Hz-0.6B-CustomVoice
 ```
 
 ### 接口

@@ -19,6 +19,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pip>=26.1.1",
     "torch>=2.0.0",
+    "wheel>=0.40.0",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,7 @@ audio = [
 qwen-tts = [
     "qwen-tts>=0.1.0",
     "transformers>=4.40.0",
+    "flash-attn>=2.0.0",
 ]
 
 [tool.uv]
