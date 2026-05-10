@@ -162,13 +162,14 @@ uv sync
 uv sync --extra qwen-tts
 
 # 3. 安装 FlashAttention 2（推荐，加速推理）
-uv run pip install -U flash-attn --no-build-isolation
+uv pip install ninja
+uv pip install -U flash-attn --no-build-isolation
 
 # 4. 验证
 uv run python -c "from qwen_tts import Qwen3TTSModel; print('ok')"
 ```
 
-> 内存不足时 flash-attn 编译可能 OOM：`MAX_JOBS=4 uv run pip install -U flash-attn --no-build-isolation`
+> 内存不足时 flash-attn 编译可能 OOM：`MAX_JOBS=1 uv pip install -U flash-attn --no-build-isolation` 按照8G内存/job计算MAX_JOBS
 
 #### 启动服务
 

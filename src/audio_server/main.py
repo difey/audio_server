@@ -74,6 +74,8 @@ async def lifespan(app: FastAPI):
     logger.info("Ready. Listening on %s:%d", settings.host, settings.port)
     yield
     logger.info("Shutting down.")
+    if _asr_engine.is_loaded:
+        await _asr_engine.unload()
 
 
 # ── App ──────────────────────────────────────────────────────────────

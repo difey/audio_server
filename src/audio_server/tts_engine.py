@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _is_qwen3_tts_model(model_name: str) -> bool:
     """Check if model name refers to a Qwen3-TTS HuggingFace model."""
-    return model_name.startswith("Qwen/Qwen3-TTS-12Hz")
+    return model_name.startswith("Qwen/Qwen3-TTS")
 
 _TTS_MODEL_URL = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
@@ -100,14 +100,6 @@ class _SherpaOnnxTtsBackend:
                 vits_config_kwargs["lexicon"] = str(
                     model_dir / model_info["lexicon"]
                 )
-
-            if "rule_fsts" in model_info:
-                rule_fst_paths = [
-                    str(model_dir / fst) for fst in model_info["rule_fsts"]
-                ]
-                rule_fsts = ",".join(rule_fst_paths)
-            else:
-                rule_fsts = ""
 
             logger.info(
                 "Loading VITS TTS model '%s' (provider=%s, threads=%d)...",

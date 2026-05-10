@@ -104,7 +104,11 @@ class Session:
                     self._transition_to_final()
 
         elif self._state == SessionState.TRANSCRIBING:
-            pass
+            # Buffer speech frames so they aren't lost while ASR runs.
+            # They'll be picked up by the next handle_audio() call once
+            # state returns to IDLE.
+            if is_speech:
+                self._pending_pcm.push(frame)
 
     # ── helpers ────────────────────────────────────────────────────────
 
@@ -140,10 +144,7 @@ class Session:
     async def _do_interim(self, audio: np.ndarray) -> None:
         """Transcribe a snapshot and send interim result."""
         try:
-            loop = asyncio.get_event_loop()
-            text, inference_ms = await loop.run_in_executor(
-                self._asr.executor, self._asr.transcribe, audio,
-            )
+            text, inference_ms = await self._asr.transcribe(audio)
             if text and text != self._last_interim_text:
                 self._last_interim_text = text
                 self._last_interim_time = time.time()
@@ -182,10 +183,7 @@ class Session:
 
         try:
             logger.info("Final transcription of %.2fs audio...", len(audio) / settings.sample_rate)
-            loop = asyncio.get_event_loop()
-            text, inference_ms = await loop.run_in_executor(
-                self._asr.executor, self._asr.transcribe, audio,
-            )
+            text, inference_ms = await self._asr.transcribe(audio)
             logger.info("Final result: '%s' (%.1fms)", text, inference_ms)
             duration = len(audio) / settings.sample_rate
             # Encode audio as base64 Int16 PCM for client-side playback
@@ -256,7 +254,7 @@ class SessionManager:
     """Manages all active WebSocket sessions."""
 
     def __init__(self):
-        self._sessions: dict[str, Session] = {}
+        self._sessions: dict[int, Session] = {}
         self._semaphore = asyncio.Semaphore(settings.max_connections)
 
     async def create_session(self, websocket: WebSocket) -> Session | None:

@@ -44,6 +44,16 @@ class Settings:
         default_factory=lambda: os.getenv("ASR_ENABLED", "true").lower() == "true"
     )
 
+    asr_batch_max_size: int = field(
+        default_factory=lambda: int(os.getenv("ASR_BATCH_MAX_SIZE", "5"))
+    )
+    asr_batch_timeout_ms: int = field(
+        default_factory=lambda: int(os.getenv("ASR_BATCH_TIMEOUT_MS", "50"))
+    )
+    asr_batch_queue_size: int = field(
+        default_factory=lambda: int(os.getenv("ASR_BATCH_QUEUE_SIZE", "20"))
+    )
+
     # ── sherpa-onnx backend ──
     # Model types: sense_voice | funasr_nano | funasr_mlt_nano | qwen3_asr | moonshine_v2
     # Auto-detected from model name, or override via SHERPA_ONNX_MODEL_TYPE.
@@ -63,7 +73,7 @@ class Settings:
         )
     )
     sherpa_onnx_num_threads: int = field(
-        default_factory=lambda: int(os.getenv("SHERPA_ONNX_NUM_THREADS", "2"))
+        default_factory=lambda: int(os.getenv("SHERPA_ONNX_NUM_THREADS", "1"))
     )
     sherpa_onnx_language: str = field(
         default_factory=lambda: os.getenv("SHERPA_ONNX_LANGUAGE", "")

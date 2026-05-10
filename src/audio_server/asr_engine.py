@@ -1,10 +1,14 @@
-"""ASR engine — sherpa-onnx backend for ONNX-based ASR models."""
+"""ASR engine — sherpa-onnx backend for ONNX-based ASR models.
 
+Supports dynamic batching via BatchScheduler for GPU concurrency control.
+"""
+
+import asyncio
 import logging
 import os
 import time
 import tarfile
-from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -216,6 +220,36 @@ class _SherpaOnnxBackend:
         inference_ms = (time.monotonic() - t0) * 1000
         return text, inference_ms
 
+    def transcribe_batch(
+        self, audios: list[np.ndarray]
+    ) -> list[tuple[str, float]]:
+        """Run batch ASR inference.
+
+        Calls ``decode_streams()`` so the GPU processes all streams
+        in a single inference call for maximum throughput.
+
+        Args:
+            audios: List of 16kHz mono float32 arrays.
+
+        Returns:
+            List of ``(text, batch_inference_ms)`` tuples, one per input.
+        """
+        t0 = time.monotonic()
+        streams = []
+        for audio in audios:
+            stream = self._recognizer.create_stream()
+            stream.accept_waveform(settings.sample_rate, audio)
+            streams.append(stream)
+
+        self._recognizer.decode_streams(streams)
+        batch_ms = (time.monotonic() - t0) * 1000
+
+        results: list[tuple[str, float]] = []
+        for stream in streams:
+            text = stream.result.text.strip()
+            results.append((text, batch_ms))
+        return results
+
     # ── Model download ──────────────────────────────────────────────
 
     def _detect_model_type(self) -> str:
@@ -377,10 +411,166 @@ class _SherpaOnnxBackend:
         logger.info("Downloaded in %.1fs (%s)", time.time() - t0, dest.name)
 
 
+# ── Dynamic Batch Scheduler ────────────────────────────────────────
+
+
+@dataclass
+class _BatchItem:
+    """A single ASR request waiting in the batch queue."""
+
+    audio: np.ndarray
+    future: "asyncio.Future[tuple[str, float]]"
+
+
+class BatchScheduler:
+    """Accumulates ASR requests and processes them as a GPU batch.
+
+    Uses a background ``asyncio`` task to collect requests from a queue,
+    then calls ``_SherpaOnnxBackend.transcribe_batch()`` when either:
+
+    - ``max_batch_size`` requests have accumulated, **or**
+    - ``max_wait_sec`` has elapsed since the first request arrived.
+
+    This serialises GPU access (only one batch at a time) while delivering
+    the throughput benefit of ``decode_streams()``.
+    """
+
+    def __init__(
+        self,
+        backend: _SherpaOnnxBackend,
+        max_batch_size: int = 5,
+        max_wait_sec: float = 0.05,
+        max_queue_size: int = 20,
+    ):
+        self._backend = backend
+        self._max_batch_size = max_batch_size
+        self._max_wait_sec = max_wait_sec
+        self._queue: asyncio.Queue[_BatchItem] = asyncio.Queue(
+            maxsize=max_queue_size
+        )
+        self._task: Optional[asyncio.Task] = None
+
+    # ── Lifecycle ──────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Launch the background batch-processing loop."""
+        if self._task is None:
+            self._task = asyncio.create_task(self._run())
+            logger.info(
+                "BatchScheduler started (batch_size=%d, timeout=%.0fms, queue=%d)",
+                self._max_batch_size,
+                self._max_wait_sec * 1000,
+                self._queue.maxsize,
+            )
+
+    async def stop(self) -> None:
+        """Cancel the background loop and drain the queue."""
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+            # Fail any remaining items so callers don't hang forever
+            while not self._queue.empty():
+                try:
+                    item = self._queue.get_nowait()
+                    if not item.future.done():
+                        item.future.set_exception(
+                            RuntimeError("BatchScheduler stopped")
+                        )
+                except asyncio.QueueEmpty:
+                    break
+
+            logger.info("BatchScheduler stopped")
+
+    # ── Public API ─────────────────────────────────────────────────
+
+    async def submit(self, audio: np.ndarray) -> tuple[str, float]:
+        """Submit a single audio chunk for ASR.
+
+        This is an ``async`` method — it puts the request on the queue
+        and awaits a ``Future`` that will be resolved when the batch
+        completes.
+
+        Returns:
+            ``(text, batch_inference_ms)``.
+        """
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        item = _BatchItem(audio=audio, future=future)
+        await self._queue.put(item)
+        return await future
+
+    # ── Background loop ────────────────────────────────────────────
+
+    async def _run(self) -> None:
+        """Background loop: repeatedly build and process batches."""
+        while True:
+            try:
+                await self._process_one_batch()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(
+                    "Batch processing error: %s", e, exc_info=True
+                )
+                # Brief pause to avoid tight looping on persistent errors
+                await asyncio.sleep(0.1)
+
+    async def _process_one_batch(self) -> None:
+        """Wait for the first item, then try to accumulate a full batch.
+
+        Returns as soon as either:
+        - ``max_batch_size`` items collected, or
+        - ``max_wait_sec`` elapsed since the first item arrived.
+        """
+        batch: list[_BatchItem] = []
+
+        # 1. Wait for at least one request
+        first = await self._queue.get()
+        batch.append(first)
+
+        # 2. Try to accumulate more up to max_batch_size or timeout
+        deadline = time.monotonic() + self._max_wait_sec
+        while len(batch) < self._max_batch_size:
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            try:
+                item = await asyncio.wait_for(
+                    self._queue.get(), timeout=remain,
+                )
+                batch.append(item)
+            except asyncio.TimeoutError:
+                break
+
+        # 3. Run batch inference (may raise → handled by _run())
+        audios = [item.audio for item in batch]
+        results = self._backend.transcribe_batch(audios)
+
+        # 4. Distribute results to each caller's Future
+        for item, (text, ms) in zip(batch, results):
+            if not item.future.done():
+                item.future.set_result((text, ms))
+
+        logger.debug(
+            "Batch processed: %d items in %.1fms",
+            len(batch), ms if results else 0,
+        )
+
+
 # ── Engine ───────────────────────────────────────────────────────────
 
 class ASREngine:
-    """Singleton wrapper around the sherpa-onnx backend."""
+    """Singleton wrapper around the sherpa-onnx backend with dynamic batching.
+
+    Use ``load()`` to initialise the model, then ``await transcribe(audio)``
+    to submit audio for ASR.  Requests are batched internally by
+    :class:`BatchScheduler` for efficient GPU utilisation.
+    """
 
     _instance: Optional["ASREngine"] = None
 
@@ -393,37 +583,58 @@ class ASREngine:
         if hasattr(self, "_initialized") and self._initialized:
             return
         self._backend: Optional[_SherpaOnnxBackend] = None
-        self._executor = ThreadPoolExecutor(
-            max_workers=2,
-            thread_name_prefix="sherpa",
-        )
+        self._scheduler: Optional[BatchScheduler] = None
         self._initialized = False
 
     def load(self) -> None:
-        """Load the model. Called once at startup."""
+        """Load the model and start the batch scheduler.
+
+        Called once at application startup.
+        """
         if self._backend is not None:
             return
         self._backend = _SherpaOnnxBackend()
+        self._scheduler = BatchScheduler(
+            backend=self._backend,
+            max_batch_size=settings.asr_batch_max_size,
+            max_wait_sec=settings.asr_batch_timeout_ms / 1000.0,
+            max_queue_size=settings.asr_batch_queue_size,
+        )
+        self._scheduler.start()
         self._initialized = True
 
-    def transcribe(self, audio: np.ndarray) -> tuple[str, float]:
-        """Run transcription.
+    async def unload(self) -> None:
+        """Stop the batch scheduler and release resources.
+
+        Called once at application shutdown.
+        """
+        if self._scheduler:
+            await self._scheduler.stop()
+            self._scheduler = None
+        self._backend = None
+        self._initialized = False
+
+    async def transcribe(self, audio: np.ndarray) -> tuple[str, float]:
+        """Submit audio for ASR via the batch scheduler.
+
+        This is an ``async`` method.  The audio is queued and processed
+        together with other pending requests in a single GPU batch.
 
         Args:
             audio: 16kHz mono float32, values in [-1, 1].
 
         Returns:
-            Tuple of (text, inference_time_ms).
+            Tuple of ``(text, inference_time_ms)``.
         """
-        if self._backend is None:
+        if self._backend is None or self._scheduler is None:
             raise RuntimeError("ASR engine not loaded. Call load() first.")
 
         if len(audio) == 0:
             return "", 0.0
 
-        text, inference_ms = self._backend.transcribe(audio)
+        text, inference_ms = await self._scheduler.submit(audio)
         logger.debug(
-            "Transcribed %.2fs audio -> '%s' (%.1fms)",
+            "Transcribed %.2fs audio -> '%s' (%.1fms, batched)",
             len(audio) / settings.sample_rate,
             text,
             inference_ms,
@@ -433,7 +644,3 @@ class ASREngine:
     @property
     def is_loaded(self) -> bool:
         return self._backend is not None
-
-    @property
-    def executor(self) -> ThreadPoolExecutor:
-        return self._executor
