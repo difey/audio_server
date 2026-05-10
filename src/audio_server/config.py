@@ -151,6 +151,14 @@ class Settings:
         default_factory=lambda: int(os.getenv("TTS_MAX_NUM_SENTENCES", "1"))
     )
 
+    # ── TTS concurrent server ──
+    tts_num_instances: int = field(
+        default_factory=lambda: int(os.getenv("TTS_NUM_INSTANCES", "3"))
+    )
+    tts_max_queue_size: int = field(
+        default_factory=lambda: int(os.getenv("TTS_MAX_QUEUE_SIZE", "30"))
+    )
+
     @property
     def model_cache_dir(self) -> Path:
         """Directory for caching downloaded models."""

@@ -1,5 +1,6 @@
 """Audio server FastAPI application entry point."""
 
+import asyncio
 import logging
 import sys
 import tempfile
@@ -76,6 +77,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down.")
     if _asr_engine.is_loaded:
         await _asr_engine.unload()
+    if _tts_engine.is_loaded:
+        await _tts_engine.unload()
 
 
 # ── App ──────────────────────────────────────────────────────────────
@@ -192,9 +195,9 @@ async def text_to_speech(req: TTSRequest):
         fmt = req.response_format
 
         if _tts_engine.is_qwen3:
-            # ── Qwen3-TTS path ──────────────────────────────────────────
+            # ── Qwen3-TTS path (async via lock + executor) ──────────────
             if fmt == "wav":
-                audio_bytes = _tts_engine.synthesize_qwen3_to_wav_bytes(
+                audio_bytes = await _tts_engine.synthesize_qwen3_to_wav_bytes(
                     text=req.input,
                     language=req.language,
                     speaker=req.voice,
@@ -203,7 +206,7 @@ async def text_to_speech(req: TTSRequest):
                 media_type = "audio/wav"
                 filename = "speech.wav"
             elif fmt == "pcm":
-                audio_bytes, sample_rate = _tts_engine.synthesize_qwen3_to_pcm_bytes(
+                audio_bytes, sample_rate = await _tts_engine.synthesize_qwen3_to_pcm_bytes(
                     text=req.input,
                     language=req.language,
                     speaker=req.voice,
@@ -212,7 +215,7 @@ async def text_to_speech(req: TTSRequest):
                 media_type = f"audio/L16; rate={sample_rate}; channels=1"
                 filename = "speech.pcm"
             elif fmt == "mp3":
-                audio_bytes = _tts_engine.synthesize_qwen3_to_mp3_bytes(
+                audio_bytes = await _tts_engine.synthesize_qwen3_to_mp3_bytes(
                     text=req.input,
                     language=req.language,
                     speaker=req.voice,
@@ -227,23 +230,23 @@ async def text_to_speech(req: TTSRequest):
                     media_type="application/json",
                 )
         else:
-            # ── Sherpa-onnx path ────────────────────────────────────────
+            # ── Sherpa-onnx path (async via TTSScheduler) ──────────────
             sid = int(req.voice) if req.voice is not None else None
 
             if fmt == "wav":
-                audio_bytes = _tts_engine.synthesize_to_wav_bytes(
+                audio_bytes = await _tts_engine.synthesize_to_wav_bytes(
                     text=req.input, sid=sid, speed=req.speed,
                 )
                 media_type = "audio/wav"
                 filename = "speech.wav"
             elif fmt == "pcm":
-                audio_bytes, sample_rate = _tts_engine.synthesize_to_pcm_bytes(
+                audio_bytes, sample_rate = await _tts_engine.synthesize_to_pcm_bytes(
                     text=req.input, sid=sid, speed=req.speed,
                 )
                 media_type = f"audio/L16; rate={sample_rate}; channels=1"
                 filename = "speech.pcm"
             elif fmt == "mp3":
-                audio_bytes = _tts_engine.synthesize_to_mp3_bytes(
+                audio_bytes = await _tts_engine.synthesize_to_mp3_bytes(
                     text=req.input, sid=sid, speed=req.speed,
                 )
                 media_type = "audio/mpeg"
@@ -261,6 +264,13 @@ async def text_to_speech(req: TTSRequest):
             headers={
                 "Content-Disposition": f'inline; filename="{filename}"',
             },
+        )
+    except asyncio.QueueFull:
+        logger.warning("TTS queue full, rejecting request")
+        return Response(
+            content='{"error": "Server busy, please try again later"}',
+            status_code=503,
+            media_type="application/json",
         )
     except Exception as e:
         logger.error("TTS synthesis error: %s", e, exc_info=True)

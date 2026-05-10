@@ -1,5 +1,6 @@
 """TTS engine — sherpa-onnx OfflineTts (Matcha-TTS, VITS/Piper) / Qwen3-TTS."""
 
+import asyncio
 import io
 import logging
 import os
@@ -7,6 +8,8 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -482,11 +485,147 @@ class _Qwen3TtsBackend:
         return proc.stdout
 
 
+# ── Format helpers (sync, for use in thread pool) ───────────────────
+
+
+def _encode_mp3_sync(samples: np.ndarray, sr: int) -> bytes:
+    """Run ffmpeg MP3 encoding synchronously.
+
+    This is intended to be called via ``run_in_executor`` so the
+    subprocess does not block the async event loop.
+    """
+    wav_buf = io.BytesIO()
+    sf.write(wav_buf, samples, samplerate=sr, format="WAV")
+    wav_buf.seek(0)
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-f", "wav", "-i", "pipe:0",
+         "-f", "mp3", "-b:a", "128k", "-bitexact", "pipe:1"],
+        input=wav_buf.read(),
+        capture_output=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg MP3 encoding failed: {proc.stderr.decode(errors='replace')}"
+        )
+    return proc.stdout
+
+
+# ── Dynamic Batch Scheduler (TTS) ────────────────────────────────────
+
+
+@dataclass
+class _TTSRequest:
+    """A single TTS request waiting in the scheduler queue."""
+
+    text: str
+    sid: Optional[int]
+    speed: Optional[float]
+    future: "asyncio.Future[tuple[np.ndarray, int]]"
+
+
+class TTSScheduler:
+    """Queues TTS requests and processes them on a thread pool.
+
+    Each :class:`_SherpaOnnxTtsBackend` instance runs in its own thread,
+    allowing multiple GPU inferences to proceed in parallel without
+    blocking the async event loop.
+    """
+
+    def __init__(
+        self,
+        backends: list[_SherpaOnnxTtsBackend],
+        max_queue_size: int = 30,
+    ):
+        self._backends = backends
+        self._queue: asyncio.Queue[_TTSRequest] = asyncio.Queue(
+            maxsize=max_queue_size
+        )
+        self._pool = ThreadPoolExecutor(max_workers=len(backends))
+        self._tasks: list[asyncio.Task] = []
+
+    # ── Lifecycle ──────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Launch one background worker per backend instance."""
+        for i, backend in enumerate(self._backends):
+            task = asyncio.create_task(self._worker(i, backend))
+            self._tasks.append(task)
+        logger.info(
+            "TTSScheduler started (%d instances, queue=%d)",
+            len(self._backends), self._queue.maxsize,
+        )
+
+    async def stop(self) -> None:
+        """Cancel all workers and drain the queue."""
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
+        self._pool.shutdown(wait=False)
+
+        # Fail any remaining requests so callers don't hang
+        while not self._queue.empty():
+            try:
+                req = self._queue.get_nowait()
+                if not req.future.done():
+                    req.future.set_exception(
+                        RuntimeError("TTS server shutting down")
+                    )
+            except asyncio.QueueEmpty:
+                break
+        logger.info("TTSScheduler stopped")
+
+    # ── Public API ─────────────────────────────────────────────────
+
+    async def submit(
+        self, text: str, sid: Optional[int], speed: Optional[float],
+    ) -> tuple[np.ndarray, int]:
+        """Submit a TTS request.
+
+        Returns a Future that resolves when a worker finishes processing.
+        """
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        req = _TTSRequest(text=text, sid=sid, speed=speed, future=future)
+        await self._queue.put(req)
+        return await future
+
+    # ── Background worker ──────────────────────────────────────────
+
+    async def _worker(
+        self, worker_id: int, backend: _SherpaOnnxTtsBackend,
+    ) -> None:
+        """Process one TTS request at a time in this worker's thread."""
+        while True:
+            try:
+                req = await self._queue.get()
+                try:
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(
+                        self._pool, backend.synthesize,
+                        req.text, req.sid, req.speed,
+                    )
+                    if not req.future.done():
+                        req.future.set_result(result)
+                except Exception as e:
+                    if not req.future.done():
+                        req.future.set_exception(e)
+            except asyncio.CancelledError:
+                break
+
+
 # ── Unified Singleton Wrapper ─────────────────────────────────────────
 
 
 class TTSEngine:
-    """Singleton wrapper that auto-selects sherpa-onnx or Qwen3-TTS backend."""
+    """Singleton wrapper with async interface backed by :class:`TTSScheduler`.
+
+    For sherpa-onnx models (the primary path), multiple backend instances
+    are created and load-balanced via ``TTSScheduler``.
+
+    For Qwen3-TTS models, a single backend is used directly (synchronous).
+    """
 
     _instance: Optional["TTSEngine"] = None
 
@@ -500,28 +639,65 @@ class TTSEngine:
             return
         self._backend: Optional[_SherpaOnnxTtsBackend] = None
         self._qwen3_backend: Optional[_Qwen3TtsBackend] = None
+        self._scheduler: Optional[TTSScheduler] = None
+
+        # Qwen3-TTS uses an asyncio lock + single-thread executor
+        # to serialise GPU access without blocking the event loop.
+        self._qwen3_lock: Optional[asyncio.Lock] = None
+        self._qwen3_executor: Optional[ThreadPoolExecutor] = None
         self._initialized = False
 
     def load(self) -> None:
-        """Load the appropriate TTS backend based on ``settings.tts_model``."""
+        """Load TTS model(s) and start the scheduler / executor.
+
+        Called once at application startup.
+        - Sherpa-onnx: N backends via ``TTSScheduler``.
+        - Qwen3-TTS: single backend + ``asyncio.Lock`` + 1-thread executor.
+        """
         if self._backend is not None or self._qwen3_backend is not None:
             return
 
         if _is_qwen3_tts_model(settings.tts_model):
             self._qwen3_backend = _Qwen3TtsBackend()
+            self._qwen3_lock = asyncio.Lock()
+            self._qwen3_executor = ThreadPoolExecutor(max_workers=1)
+            logger.info(
+                "Qwen3-TTS ready (lock + 1-thread executor)"
+            )
         else:
-            self._backend = _SherpaOnnxTtsBackend()
+            num = settings.tts_num_instances
+            backends = [_SherpaOnnxTtsBackend() for _ in range(num)]
+            self._backend = backends[0]  # reference for properties
+            self._scheduler = TTSScheduler(
+                backends=backends,
+                max_queue_size=settings.tts_max_queue_size,
+            )
+            self._scheduler.start()
+
         self._initialized = True
 
-    # ── Sherpa-onnx interface (original) ───────────────────────────────
+    async def unload(self) -> None:
+        """Stop the scheduler and release resources."""
+        if self._scheduler:
+            await self._scheduler.stop()
+            self._scheduler = None
+        if self._qwen3_executor:
+            self._qwen3_executor.shutdown(wait=False)
+            self._qwen3_executor = None
+        self._qwen3_lock = None
+        self._backend = None
+        self._qwen3_backend = None
+        self._initialized = False
 
-    def synthesize(
+    # ── Sherpa-onnx interface (async via scheduler) ──────────────────
+
+    async def synthesize(
         self,
         text: str,
         sid: Optional[int] = None,
         speed: Optional[float] = None,
     ) -> tuple[np.ndarray, int]:
-        """Synthesize text to audio (sherpa-onnx backend).
+        """Synthesize text to audio (sherpa-onnx backend, async).
 
         Args:
             text: Input text.
@@ -531,112 +707,122 @@ class TTSEngine:
         Returns:
             Tuple of (float32 samples, sample_rate).
         """
-        if self._backend is None:
-            raise RuntimeError(
-                "Sherpa-onnx TTS not loaded. Use a qwen3 model name or check config."
-            )
-        return self._backend.synthesize(text, sid=sid, speed=speed)
+        if self._scheduler is None:
+            raise RuntimeError("Sherpa-onnx TTS not loaded.")
+        return await self._scheduler.submit(text, sid, speed)
 
-    def synthesize_to_wav_bytes(
+    async def synthesize_to_wav_bytes(
         self,
         text: str,
         sid: Optional[int] = None,
         speed: Optional[float] = None,
     ) -> bytes:
-        """Synthesize text and return WAV bytes (sherpa-onnx)."""
-        if self._backend is None:
-            raise RuntimeError("Sherpa-onnx TTS not loaded.")
-        return self._backend.synthesize_to_wav_bytes(text, sid=sid, speed=speed)
+        """Synthesize text and return WAV bytes (async)."""
+        samples, sr = await self.synthesize(text, sid=sid, speed=speed)
+        buf = io.BytesIO()
+        sf.write(buf, samples, samplerate=sr, format="WAV")
+        buf.seek(0)
+        return buf.read()
 
-    def synthesize_to_pcm_bytes(
+    async def synthesize_to_pcm_bytes(
         self,
         text: str,
         sid: Optional[int] = None,
         speed: Optional[float] = None,
     ) -> tuple[bytes, int]:
-        """Synthesize text and return raw Int16 PCM bytes (sherpa-onnx)."""
-        if self._backend is None:
-            raise RuntimeError("Sherpa-onnx TTS not loaded.")
-        return self._backend.synthesize_to_pcm_bytes(text, sid=sid, speed=speed)
+        """Synthesize text and return raw Int16 PCM bytes (async)."""
+        samples, sr = await self.synthesize(text, sid=sid, speed=speed)
+        int16_data = (samples * 32767).clip(-32768, 32767).astype(np.int16)
+        return int16_data.tobytes(), sr
 
-    def synthesize_to_mp3_bytes(
+    async def synthesize_to_mp3_bytes(
         self,
         text: str,
         sid: Optional[int] = None,
         speed: Optional[float] = None,
     ) -> bytes:
-        """Synthesize text and return MP3 bytes (sherpa-onnx)."""
-        if self._backend is None:
-            raise RuntimeError("Sherpa-onnx TTS not loaded.")
-        return self._backend.synthesize_to_mp3_bytes(text, sid=sid, speed=speed)
+        """Synthesize text and return MP3 bytes via ffmpeg (async).
 
-    # ── Qwen3-TTS interface (new) ──────────────────────────────────────
+        Both the GPU inference and the ffmpeg subprocess run in the
+        thread pool so neither blocks the event loop.
+        """
+        samples, sr = await self.synthesize(text, sid=sid, speed=speed)
+        # ffmpeg encoding is CPU-heavy, run in executor too
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None,  # default thread pool
+            _encode_mp3_sync, samples, sr,
+        )
 
-    def synthesize_qwen3(
+    # ── Qwen3-TTS interface (async via lock + executor) ──────────────
+
+    async def synthesize_qwen3(
         self,
         text: str,
         language: Optional[str] = None,
         speaker: Optional[str] = None,
         instruct: Optional[str] = None,
     ) -> tuple[np.ndarray, int]:
-        """Synthesize text using Qwen3-TTS CustomVoice.
+        """Synthesize text using Qwen3-TTS (async).
 
-        Args:
-            text: Input text.
-            language: Language (e.g. ``"Chinese"``, ``"English"``).
-            speaker: Speaker name (e.g. ``"Vivian"``, ``"Ryan"``).
-            instruct: Optional instruction (1.7B only).
-
-        Returns:
-            Tuple of (float32 samples, sample_rate).
+        GPU access is serialised via ``asyncio.Lock`` and the blocking
+        ``generate_custom_voice`` call runs in a dedicated thread so
+        the event loop stays responsive.
         """
-        if self._qwen3_backend is None:
-            raise RuntimeError(
-                "Qwen3-TTS not loaded. Use a sherpa-onnx model name or set TTS_MODEL"
-                " to a Qwen3-TTS model ID."
-            )
-        return self._qwen3_backend.synthesize(
-            text, language=language, speaker=speaker, instruct=instruct,
-        )
+        if self._qwen3_backend is None or self._qwen3_lock is None:
+            raise RuntimeError("Qwen3-TTS not loaded.")
 
-    def synthesize_qwen3_to_wav_bytes(
+        loop = asyncio.get_event_loop()
+        async with self._qwen3_lock:
+            # Run the blocking backend.synthesize() in the executor
+            return await loop.run_in_executor(
+                self._qwen3_executor,
+                self._qwen3_backend.synthesize,
+                text,
+                language,
+                speaker,
+                instruct,
+            )
+
+    async def synthesize_qwen3_to_wav_bytes(
         self,
         text: str,
         language: Optional[str] = None,
         speaker: Optional[str] = None,
         instruct: Optional[str] = None,
     ) -> bytes:
-        """Synthesize text and return WAV bytes (Qwen3-TTS)."""
-        samples, sr = self.synthesize_qwen3(
+        samples, sr = await self.synthesize_qwen3(
             text, language=language, speaker=speaker, instruct=instruct,
         )
         return self._qwen3_backend._to_wav_bytes(samples, sr)
 
-    def synthesize_qwen3_to_pcm_bytes(
+    async def synthesize_qwen3_to_pcm_bytes(
         self,
         text: str,
         language: Optional[str] = None,
         speaker: Optional[str] = None,
         instruct: Optional[str] = None,
     ) -> tuple[bytes, int]:
-        """Synthesize text and return raw Int16 PCM bytes (Qwen3-TTS)."""
-        samples, sr = self.synthesize_qwen3(
+        samples, sr = await self.synthesize_qwen3(
             text, language=language, speaker=speaker, instruct=instruct,
         )
         return self._qwen3_backend._to_pcm_bytes(samples, sr)
 
-    def synthesize_qwen3_to_mp3_bytes(
+    async def synthesize_qwen3_to_mp3_bytes(
         self,
         text: str,
         language: Optional[str] = None,
         speaker: Optional[str] = None,
         instruct: Optional[str] = None,
     ) -> bytes:
-        """Synthesize text and return MP3 bytes (Qwen3-TTS)."""
-        samples, sr = self.synthesize_qwen3(
+        samples, sr = await self.synthesize_qwen3(
             text, language=language, speaker=speaker, instruct=instruct,
         )
-        return self._qwen3_backend._to_mp3_bytes(samples, sr)
+        # ffmpeg is CPU-heavy, run in default executor
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, _encode_mp3_sync, samples, sr,
+        )
 
     # ── Properties ─────────────────────────────────────────────────────
 
