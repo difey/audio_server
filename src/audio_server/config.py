@@ -63,6 +63,9 @@ class Settings:
             "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25",
         )
     )
+    sherpa_onnx_model_type: str = field(
+        default_factory=lambda: os.getenv("SHERPA_ONNX_MODEL_TYPE", "")
+    )
     sherpa_onnx_model_dir: str = field(
         default_factory=lambda: os.getenv("SHERPA_ONNX_MODEL_DIR", "")
     )

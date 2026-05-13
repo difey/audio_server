@@ -121,11 +121,14 @@ async def run_benchmark():
         print(f"Error: No WAV files found in {args.dir}")
         sys.exit(1)
 
+    model_type = args.model or os.getenv("SHERPA_ONNX_MODEL_TYPE") or "auto-detect"
+
     # ── Load model ─────────────────────────────────────────────────
     print("=" * 80)
     print("ASR RTF Benchmark")
     print("=" * 80)
-    print(f"  Model Type: {args.model or settings.sherpa_onnx_model_type}")
+    print(f"  Model Type: {model_type}")
+    print(f"  Model:      {settings.sherpa_onnx_model}")
     print(f"  Provider:   {settings.sherpa_onnx_provider}")
     print(f"  Threads:    {settings.sherpa_onnx_num_threads}")
     print(f"  Files:      {len(files)}")
