@@ -136,7 +136,7 @@ class Session:
         self._interim_running = True
         audio = self._buffer.as_float32()  # snapshot, don't clear
         # Only run if there's enough new audio since last interim
-        if len(audio) >= settings.sample_rate * 0.15:  # ≥ 150ms
+        if len(audio) >= settings.sample_rate * 0.3:  # ≥ 300ms
             asyncio.ensure_future(self._do_interim(audio))
         else:
             self._interim_running = False

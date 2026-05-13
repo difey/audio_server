@@ -33,26 +33,6 @@ _asr_engine = ASREngine()
 _tts_engine = TTSEngine()
 
 
-def _patch_webrtcvad():
-    """Patch webrtcvad to use importlib.metadata instead of pkg_resources."""
-    import importlib.metadata
-    try:
-        import webrtcvad as _mod
-        src = _mod.__file__
-        if src and src.endswith(".py"):
-            content = Path(src).read_text()
-            if "pkg_resources" in content:
-                new_content = content.replace(
-                    "import pkg_resources",
-                    "from importlib.metadata import version as _ver",
-                ).replace(
-                    "pkg_resources.get_distribution('webrtcvad').version",
-                    "_ver('webrtcvad')",
-                )
-                Path(src).write_text(new_content)
-                logger.info("Patched webrtcvad %s", src)
-    except Exception as e:
-        logger.warning("Failed to patch webrtcvad: %s", e)
 
 
 @asynccontextmanager
@@ -61,7 +41,6 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Audio server...")
 
     if settings.asr_enabled:
-        _patch_webrtcvad()
         _asr_engine.load()
     else:
         logger.info("ASR is disabled (set ASR_ENABLED=true to enable)")
