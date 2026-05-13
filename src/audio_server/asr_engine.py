@@ -64,6 +64,7 @@ class _SherpaOnnxBackend:
     _MOONSHINE_V2_ZH = "sherpa-onnx-moonshine-base-zh-quantized-2026-02-27"
     _MOONSHINE_V2_EN = "sherpa-onnx-moonshine-base-en-quantized-2026-02-27"
     _MOONSHINE_V2_ES = "sherpa-onnx-moonshine-base-es-quantized-2026-02-27"
+    _OMNILINGUAL = "sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12"
 
     # funasr_mlt_nano shares same file structure as funasr_nano.
     # Its model name is dynamic (date-stamped by CI), so we read it
@@ -74,6 +75,7 @@ class _SherpaOnnxBackend:
         "funasr_mlt_nano": None,  # uses SHERPA_ONNX_MODEL
         "qwen3_asr": _QWEN3_ASR,
         "moonshine_v2": _MOONSHINE_V2_ZH,
+        "omnilingual": _OMNILINGUAL,
     }
 
     # Known moonshine v2 variants for auto-detection
@@ -115,6 +117,8 @@ class _SherpaOnnxBackend:
             self._init_qwen3_asr(model_dir)
         elif self._model_type == "moonshine_v2":
             self._init_moonshine_v2(model_dir)
+        elif self._model_type == "omnilingual":
+            self._init_omnilingual(model_dir)
         else:
             self._init_sense_voice(model_dir, lang)
 
@@ -230,6 +234,30 @@ class _SherpaOnnxBackend:
             provider=settings.sherpa_onnx_provider,
         )
 
+    def _init_omnilingual(self, model_dir: Path) -> None:
+        try:
+            import sherpa_onnx
+        except ImportError:
+            raise ImportError("sherpa-onnx is not installed. Install with: pip install .[asr]")
+
+        logger.info(
+            "Loading sherpa-onnx Omnilingual ASR 1600 Languages (provider=%s, threads=%d)...",
+            settings.sherpa_onnx_provider,
+            settings.sherpa_onnx_num_threads,
+        )
+        # model.int8.onnx, tokens.txt
+        model = model_dir / "model.int8.onnx"
+        tokens = model_dir / "tokens.txt"
+
+        self._recognizer = sherpa_onnx.OfflineRecognizer.from_omnilingual_asr_ctc(
+            model=str(model),
+            tokens=str(tokens),
+            num_threads=settings.sherpa_onnx_num_threads,
+            decoding_method="greedy_search",
+            debug=False,
+            provider=settings.sherpa_onnx_provider,
+        )
+
     # ── Transcribe ──────────────────────────────────────────────────
 
     def transcribe(self, audio: np.ndarray) -> tuple[str, float]:
@@ -299,6 +327,8 @@ class _SherpaOnnxBackend:
             return "funasr_mlt_nano"
         if "funasr" in model_name.lower():
             return "funasr_nano"
+        if "omnilingual" in model_name.lower():
+            return "omnilingual"
         return "sense_voice"
 
     def _ensure_model(self) -> Path:
@@ -354,6 +384,8 @@ class _SherpaOnnxBackend:
             return ["conv_frontend.onnx", "encoder.int8.onnx", "decoder.int8.onnx"]
         if self._model_type == "moonshine_v2":
             return ["encoder_model.ort"]
+        if self._model_type == "omnilingual":
+            return ["model.int8.onnx", "tokens.txt"]
         # sense_voice
         return ["model.int8.onnx"]
 
