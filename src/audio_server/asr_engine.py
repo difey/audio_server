@@ -100,7 +100,8 @@ class _SherpaOnnxBackend:
     }
 
     def __init__(self):
-        import sherpa_onnx
+        # We don't import sherpa_onnx here to allow the engine class to be defined
+        # even if the dependency is missing (only fails when load() is called).
 
         self._model_type = self._detect_model_type()
         model_dir = self._ensure_model()
@@ -109,19 +110,24 @@ class _SherpaOnnxBackend:
         t0 = time.time()
 
         if self._model_type in ("funasr_nano", "funasr_mlt_nano"):
-            self._init_funasr_nano(sherpa_onnx, model_dir, lang)
+            self._init_funasr_nano(model_dir, lang)
         elif self._model_type == "qwen3_asr":
-            self._init_qwen3_asr(sherpa_onnx, model_dir)
+            self._init_qwen3_asr(model_dir)
         elif self._model_type == "moonshine_v2":
-            self._init_moonshine_v2(sherpa_onnx, model_dir)
+            self._init_moonshine_v2(model_dir)
         else:
-            self._init_sense_voice(sherpa_onnx, model_dir, lang)
+            self._init_sense_voice(model_dir, lang)
 
         logger.info("Model loaded in %.2fs", time.time() - t0)
 
     # ── Init helpers ────────────────────────────────────────────────
 
-    def _init_sense_voice(self, sherpa_onnx, model_dir: Path, lang: str) -> None:
+    def _init_sense_voice(self, model_dir: Path, lang: str) -> None:
+        try:
+            import sherpa_onnx
+        except ImportError:
+            raise ImportError("sherpa-onnx is not installed. Install with: pip install .[asr]")
+
         logger.info(
             "Loading sherpa-onnx SenseVoice (provider=%s, threads=%d, language=%s)...",
             settings.sherpa_onnx_provider,
@@ -138,7 +144,12 @@ class _SherpaOnnxBackend:
             provider=settings.sherpa_onnx_provider,
         )
 
-    def _init_funasr_nano(self, sherpa_onnx, model_dir: Path, lang: str) -> None:
+    def _init_funasr_nano(self, model_dir: Path, lang: str) -> None:
+        try:
+            import sherpa_onnx
+        except ImportError:
+            raise ImportError("sherpa-onnx is not installed. Install with: pip install .[asr]")
+
         model_label = "FunASR" if self._model_type == "funasr_nano" else "FunASR-MLT"
         logger.info(
             "Loading sherpa-onnx %s (provider=%s, threads=%d, language=%s, itn=%s)...",
@@ -168,7 +179,12 @@ class _SherpaOnnxBackend:
             provider=settings.sherpa_onnx_provider,
         )
 
-    def _init_qwen3_asr(self, sherpa_onnx, model_dir: Path) -> None:
+    def _init_qwen3_asr(self, model_dir: Path) -> None:
+        try:
+            import sherpa_onnx
+        except ImportError:
+            raise ImportError("sherpa-onnx is not installed. Install with: pip install .[asr]")
+
         logger.info(
             "Loading sherpa-onnx Qwen3-ASR 0.6B (provider=%s, threads=%d)...",
             settings.sherpa_onnx_provider,
@@ -189,7 +205,12 @@ class _SherpaOnnxBackend:
             provider=settings.sherpa_onnx_provider,
         )
 
-    def _init_moonshine_v2(self, sherpa_onnx, model_dir: Path) -> None:
+    def _init_moonshine_v2(self, model_dir: Path) -> None:
+        try:
+            import sherpa_onnx
+        except ImportError:
+            raise ImportError("sherpa-onnx is not installed. Install with: pip install .[asr]")
+
         logger.info(
             "Loading sherpa-onnx Moonshine V2 (provider=%s, threads=%d)...",
             settings.sherpa_onnx_provider,

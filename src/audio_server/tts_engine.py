@@ -67,7 +67,10 @@ class _SherpaOnnxTtsBackend:
     """Wrapper around sherpa-onnx OfflineTts (Matcha-TTS / VITS-Piper)."""
 
     def __init__(self):
-        import sherpa_onnx
+        try:
+            import sherpa_onnx
+        except ImportError:
+            raise ImportError("sherpa-onnx is not installed. Install with: pip install .[tts-sherpa]")
 
         model_name = settings.tts_model
         if model_name not in _TTS_MODELS:
@@ -361,7 +364,10 @@ class _Qwen3TtsBackend:
         device = settings.tts_qwen3_device
         dtype_str = settings.tts_qwen3_dtype
 
-        import torch
+        try:
+            import torch
+        except ImportError:
+            raise ImportError("torch is not installed. Install with: pip install .[tts-qwen]")
 
         dtype_map = {
             "float16": torch.float16,
@@ -376,7 +382,10 @@ class _Qwen3TtsBackend:
         )
         t0 = time.monotonic()
 
-        from qwen_tts import Qwen3TTSModel
+        try:
+            from qwen_tts import Qwen3TTSModel
+        except ImportError:
+            raise ImportError("qwen-tts is not installed. Install with: pip install .[tts-qwen]")
 
         self._model = Qwen3TTSModel.from_pretrained(
             model_id,
