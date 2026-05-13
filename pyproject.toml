@@ -3,7 +3,7 @@ name = "audio-server"
 version = "0.1.0"
 description = "OpenAI-compatible streaming ASR service"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
@@ -20,7 +20,7 @@ dependencies = [
 asr = [
     "sherpa-onnx>=1.12.0",
     "webrtcvad>=2.0.10",
-    "onnxruntime>=1.24.3",
+    "onnxruntime==1.24.4",
 ]
 tts-sherpa = [
     "sherpa-onnx>=1.12.0",
