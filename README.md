@@ -324,16 +324,24 @@ scripts/
 
 ---
 
-## macOS 注意
+## 注意 (macOS / Linux)
 
-sherpa-onnx 缺少 onnxruntime 动态库，需手动修复：
+由于 `sherpa-onnx` 可能无法自动找到 `onnxruntime` 的动态库，如果启动报错，请手动建立软连接修复（以 Python 3.11 为例）：
 
+### macOS
 ```bash
 ln -sf .venv/lib/python3.11/site-packages/onnxruntime/capi/libonnxruntime.*.dylib \
        .venv/lib/python3.11/site-packages/sherpa_onnx/lib/libonnxruntime.1.24.4.dylib
 ```
 
-**Linux / ARM64 上不需要此步骤。**
+### Linux
+```bash
+ln -sf .venv/lib/python3.11/site-packages/onnxruntime/capi/libonnxruntime_providers_shared.so \
+       .venv/lib/python3.11/site-packages/sherpa_onnx/lib/libonnxruntime.so.1.24.4
+```
+
+> [!NOTE]
+> 请根据实际的 Python 版本（如 3.10, 3.12）和 `.venv` 路径调整上述命令。
 
 ---
 
